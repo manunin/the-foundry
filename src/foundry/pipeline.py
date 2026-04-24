@@ -3,8 +3,9 @@ from __future__ import annotations
 import traceback
 
 import structlog
+from langfuse import observe
 
-from . import state, worktree
+from . import observability, state, worktree
 from .config import Settings
 from .models import Stage, Task, TaskStatus
 from .stages import agent_implement as agent_implement_stage
@@ -29,6 +30,7 @@ def _mark(settings: Settings, task: Task, *, stage: Stage, status: TaskStatus | 
     return state.upsert_task(settings.db_path, task)
 
 
+@observe(name="task.process")
 def _process_task(settings: Settings, task: Task) -> Task:
     log.info("task.start", task_id=task.id, issue=task.issue_number)
 
@@ -86,6 +88,7 @@ def run_once(settings: Settings) -> list[Task]:
     Failures in one task do not stop the batch — they're persisted and the next
     task proceeds. Returns the final list of tasks touched in this run.
     """
+    observability.init_langfuse()
     state.init_db(settings.db_path)
     tasks = fetch_stage.fetch(settings)
     log.info("run.fetched", count=len(tasks))
@@ -123,4 +126,5 @@ def run_once(settings: Settings) -> list[Task]:
                 )
             state.upsert_task(settings.db_path, task)
             processed.append(task)
+    observability.flush()
     return processed

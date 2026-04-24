@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from langfuse import observe
+
 from ..agents import AgentSettings, AgentStage, AgentTask, make_agent
 from ..config import Settings
 from ..models import Task
 
 
+@observe(name="stage.plan")
 def run(task: Task, ctx: dict, worktree_path: Path, settings: Settings) -> dict:
     """Agent-backed plan stage: delegates to the configured plan_agent.
 

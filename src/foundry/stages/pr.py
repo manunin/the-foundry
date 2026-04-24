@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from langfuse import observe
+
 from .. import shell
 from ..config import Settings
 from ..models import Task
 
 
+@observe(name="stage.pr")
 def run(task: Task, worktree_path: Path, branch_name: str, settings: Settings) -> dict:
     """Commit, push and open a PR against settings.target_repo.
 
