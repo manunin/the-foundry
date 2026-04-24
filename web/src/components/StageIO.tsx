@@ -21,38 +21,59 @@ interface Props {
 
 const TEXT_HEIGHT_LIMIT = 180;
 
+const KV_TRUNCATE_AT = 80;
+
 function KVList({ items }: { items: [string, string][] }): JSX.Element {
+  const [expanded, setExpanded] = useState(false);
+  const hasLong = items.some(([, v]) => v.length > KV_TRUNCATE_AT || v.includes("\n"));
   return (
-    <dl
-      style={{
-        margin: 0,
-        display: "grid",
-        gridTemplateColumns: "auto 1fr",
-        gap: "4px 12px",
-        fontSize: 11.5,
-      }}
-    >
-      {items.map(([k, v], i) => (
-        <div key={`${i}-${k}`} style={{ display: "contents" }}>
-          <dt className="mono" style={{ color: "var(--fg-3)" }}>
-            {k}
-          </dt>
-          <dd
-            className="mono"
-            style={{
-              color: "var(--fg-0)",
-              margin: 0,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-            title={v}
-          >
-            {v}
-          </dd>
-        </div>
-      ))}
-    </dl>
+    <div>
+      <dl
+        style={{
+          margin: 0,
+          display: "grid",
+          gridTemplateColumns: "auto 1fr",
+          gap: "4px 12px",
+          fontSize: 11.5,
+        }}
+      >
+        {items.map(([k, v], i) => (
+          <div key={`${i}-${k}`} style={{ display: "contents" }}>
+            <dt className="mono" style={{ color: "var(--fg-3)" }}>
+              {k}
+            </dt>
+            <dd
+              className="mono"
+              style={{
+                color: "var(--fg-0)",
+                margin: 0,
+                overflow: "hidden",
+                textOverflow: expanded ? "clip" : "ellipsis",
+                whiteSpace: expanded ? "pre-wrap" : "nowrap",
+                wordBreak: expanded ? "break-word" : "normal",
+              }}
+              title={expanded ? undefined : v}
+            >
+              {v}
+            </dd>
+          </div>
+        ))}
+      </dl>
+      {hasLong && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          style={{
+            marginTop: 6,
+            fontSize: 11,
+            color: "var(--accent)",
+            cursor: "pointer",
+          }}
+        >
+          {expanded ? "свернуть" : "показать всё"}
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -242,12 +263,31 @@ export default function StageIO({ data }: Props): JSX.Element {
     ([k]) => k !== "kind" && k !== "truncated" && k !== "original_size",
   );
   if (entries.length === 0) return <Empty />;
+
+  // Pull out long text fields (prompt, plan, text) into TextBlocks so they
+  // render as raw collapsible text instead of one-line truncated kv values.
+  const LONG_TEXT_KEYS = new Set(["prompt", "plan", "text"]);
+  const kvEntries: [string, unknown][] = [];
+  const textEntries: [string, string][] = [];
+  for (const [k, v] of entries) {
+    if (LONG_TEXT_KEYS.has(k) && typeof v === "string" && v.length > 0) {
+      textEntries.push([k, v]);
+    } else {
+      kvEntries.push([k, v]);
+    }
+  }
+
   const folderIcon = <Folder className="ico-sm" style={{ display: "none" }} />;
   return (
-    <>
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       {folderIcon}
-      <KVList items={entries.map(([k, v]) => [k, stringify(v)])} />
-    </>
+      {kvEntries.length > 0 && (
+        <KVList items={kvEntries.map(([k, v]) => [k, stringify(v)])} />
+      )}
+      {textEntries.map(([k, v]) => (
+        <TextBlock key={k} label={k} text={v} />
+      ))}
+    </div>
   );
 }
 

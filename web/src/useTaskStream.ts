@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { fetchTask } from "./api";
+import { apiUrl, fetchTask } from "./api";
 import type { UiEvent } from "./api";
 
 interface StreamState {
@@ -15,6 +15,16 @@ interface StreamState {
 interface Options {
   enabled?: boolean;
 }
+
+const SSE_EVENT_KINDS = [
+  "stage_started",
+  "stage_finished",
+  "stage_failed",
+  "agent_tool",
+  "agent_text",
+  "agent_thinking",
+  "agent_result",
+] as const;
 
 export function useTaskStream(
   taskId: number | null,
@@ -62,7 +72,7 @@ export function useTaskStream(
       if (cancelled) return;
       // EventSource automatically sends Last-Event-ID on reconnect,
       // based on `id:` lines it has seen.
-      es = new EventSource(`/api/tasks/${taskId}/events`);
+      es = new EventSource(apiUrl(`/api/tasks/${taskId}/events`));
       es.onopen = () => {
         if (cancelled) return;
         setConnected(true);
@@ -73,7 +83,7 @@ export function useTaskStream(
         setConnected(false);
         // Browser auto-reconnects; we don't close here.
       };
-      es.onmessage = (e) => {
+      const handleMessage = (e: MessageEvent<string>): void => {
         if (cancelled) return;
         try {
           const parsed = JSON.parse(e.data) as UiEvent;
@@ -82,6 +92,10 @@ export function useTaskStream(
           // ignore malformed frames
         }
       };
+      es.onmessage = handleMessage;
+      for (const kind of SSE_EVENT_KINDS) {
+        es.addEventListener(kind, handleMessage);
+      }
     };
 
     // 1) Pull snapshot via REST.
