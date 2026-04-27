@@ -1,19 +1,180 @@
 # The Foundry
 
-Проект в рамках **Hacker Sprint #1: Фабрика фичей** (https://www.notion.so/Hacker-Sprint-1-33f2db4c860e8064a657e199b4578f66?source=copy_link).
+Оркестратор «agentic feature pipeline»: GitHub issue → план → реализация → верификация → PR. Каждая задача проходит линейный FSM (`fetch → context → plan → implement → verify → pr → done`), исполняется в собственном git-worktree и пишет append-only лог событий в SQLite. Сверху живёт FastAPI + React UI с лайв-стримом (SSE) того, что делает агент.
 
-## Docs
-Документы, логи встреч и прочие текстовые артефакты храним в папке `/docs`.
+Проект сделан в рамках **Hacker Sprint #1: Фабрика фичей** ([Notion](https://www.notion.so/Hacker-Sprint-1-33f2db4c860e8064a657e199b4578f66?source=copy_link)).
 
-## Что нужно сделать вручную до первого прогона
-1. `brew install uv gh`
-2. `gh auth login` — токен с правом `repo`.
-3. Создать на GitHub sandbox-репо (например `the-foundry-sandbox`, либо использовать существующий репо https://github.com/Zhurbin/the-foundry-sandbox), лейбл `agent-task`, 1–2 issue.
-4. `cp .env.example .env` и заполнить `SOURCE_REPO`, `TARGET_REPO`.
-5. `uv sync && uv run foundry run` — ожидаемый результат: в sandbox появился PR с новой строкой в README.
+> **TL;DR.** Поставь зависимости (`uv sync`, `cd web && npm install`), скопируй `.env.example` → `.env`, заполни `SOURCE_REPO`/`TARGET_REPO`, и запускай три процесса в трёх терминалах: **listener** (`uv run foundry run`), **API** (`uv run uvicorn api.main:app --reload`), **UI** (`cd web && npm run dev`). По умолчанию listener гоняет stub-агента (оффлайн); чтобы получить реальный код от LLM, поставь `claude` CLI и переключи `CODING_AGENT=claude_cli`.
 
-## Coding agent
+---
 
-Стадии `plan` и `implement` делегированы агентному слою (`src/foundry/agents/`). Бэкенды: `stub` (оффлайн, по умолчанию) и `claude_cli` (shell-out в `claude` CLI). Переключается переменной `CODING_AGENT` в `.env`; per-stage оверрайды — `AGENT_PLAN_*`, `AGENT_IMPLEMENT_*`, `AGENT_VERIFY_*`. Промты живут в [src/foundry/agents/prompts/](src/foundry/agents/prompts/).
+## Содержание
 
-Быстрый smoke-прогон с реальным claude: `scripts/add-and-process.sh` создаст issue в sandbox и пройдёт весь pipeline до PR.
+- [Что внутри](#что-внутри)
+- [Подготовка окружения](#подготовка-окружения)
+- [Конфигурация (`.env`)](#конфигурация-env)
+- [Запуск: три раннера](#запуск-три-раннера)
+- [Smoke-прогон](#smoke-прогон)
+- [Тесты](#тесты)
+- [Документация](#документация)
+
+---
+
+## Что внутри
+
+| Компонент | Где живёт | Что делает |
+| --- | --- | --- |
+| **Listener / pipeline** | [src/foundry/](src/foundry/) (entrypoint `foundry` CLI) | Поллит GitHub issue с заданным лейблом, прогоняет каждый через стадии, открывает PR и закрывает issue. Состояние — SQLite. |
+| **Coding agents** | [src/foundry/agents/](src/foundry/agents/) | Pluggable backends для стадий `plan`/`implement`/`verify`: `stub` (оффлайн, по умолчанию), `claude_cli`, `codex_cli`, `opencode_cli`. |
+| **HTTP API** | [src/api/](src/api/) (FastAPI на `:8000`) | `/api/tasks`, `/api/tasks/{id}`, SSE на `/api/tasks/{id}/events`, `/api/repos`. |
+| **Web UI** | [web/](web/) (Vite + React + TS на `:5173`) | Список задач, раскрывающаяся карточка со stepper'ом и потоком событий агента. |
+
+Подробнее по слоям — [CLAUDE.md](CLAUDE.md) (project map), [docs/architecture/skeleton.md](docs/architecture/skeleton.md) и [DEBUG.md](DEBUG.md) (verified runbook).
+
+---
+
+## Подготовка окружения
+
+**Обязательные инструменты в PATH:**
+
+```bash
+brew install uv gh node                  # uv, gh, Node.js
+gh auth login                            # токен с правом `repo`
+```
+
+**Опционально — реальный coding-агент** (если хочешь, чтобы план/имплементацию писала LLM, а не stub):
+
+```bash
+# Anthropic Claude CLI (https://docs.claude.com/en/docs/claude-code/setup)
+brew install --cask claude
+claude /login                            # OAuth подписки или ANTHROPIC_API_KEY
+```
+
+**GitHub-стороны** (один или два репозитория — могут совпадать):
+
+1. Sandbox-репо для issue (`SOURCE_REPO`). Пример: `your-org/the-foundry-sandbox`.
+2. Лейбл для тегирования задач (по умолчанию `agent-task`).
+3. Репо, в который пушим PR (`TARGET_REPO`). Чаще всего тот же, что и `SOURCE_REPO`.
+
+---
+
+## Конфигурация (`.env`)
+
+```bash
+cp .env.example .env
+$EDITOR .env
+```
+
+Минимальные обязательные поля — `SOURCE_REPO` и `TARGET_REPO`. Без них любая команда `foundry` падает с `config error`.
+
+### Живой пример: pipeline на Claude Code
+
+Stub-режим хорош для smoke-теста (оффлайн, детерминирован: добавляет строку в `README.md`), но для реального прогона проще всего взять `claude` CLI:
+
+```bash
+# .env
+
+SOURCE_REPO=your-org/the-foundry-sandbox
+TARGET_REPO=your-org/the-foundry-sandbox
+ISSUE_LABEL=agent-task
+
+# Coding agent — Claude CLI на подписке (OAuth) или ANTHROPIC_API_KEY
+CODING_AGENT=claude_cli
+AGENT_MODEL=sonnet                 # haiku | sonnet | opus | <full id>
+AGENT_MAX_TURNS=20
+AGENT_TIMEOUT_SEC=600
+
+# Хочется быстрее на planning/verify, но мощнее на implement?
+AGENT_PLAN_MODEL=haiku
+AGENT_VERIFY_MODEL=haiku
+AGENT_IMPLEMENT_MODEL=sonnet
+AGENT_IMPLEMENT_MAX_TURNS=40
+```
+
+Все доступные ключи и оверрайды задокументированы в [.env.example](.env.example) (в т.ч. `codex_cli`, `opencode_cli` и опциональный Langfuse-трейсинг).
+
+---
+
+## Запуск: три раннера
+
+UI и листенер — **разные процессы**, читающие одну и ту же SQLite. Запускай каждый в своём терминале (или в `tmux`/Process Compose).
+
+### 1. Listener (pipeline)
+
+```bash
+uv run foundry run                       # бесконечный polling-режим
+uv run foundry run --once                # одиночный проход и выход
+uv run foundry run --interval 10         # переопределить POLL_INTERVAL_SECONDS
+```
+
+Каждый проход: `fetch labeled issues → context → plan → implement → verify → pr` для каждой задачи. Результат каждой стадии пишется в `task_events` (SQLite) — UI читает оттуда. Дополнительные команды:
+
+```bash
+uv run foundry status                    # таблица всех задач из БД
+uv run foundry reset <task_id>           # вернуть задачу в PENDING/FETCH (для отладки)
+```
+
+### 2. Backend API (FastAPI)
+
+```bash
+uv run uvicorn api.main:app --reload     # http://localhost:8000
+```
+
+Эндпоинты: `GET /api/tasks`, `GET /api/tasks/{id}`, `GET /api/tasks/{id}/events` (SSE, поддерживает `Last-Event-ID`), `GET /api/repos`. Health: `GET /`.
+
+### 3. Web UI
+
+```bash
+cd web && npm install                    # один раз
+npm run dev                              # http://localhost:5173
+```
+
+Vite-прокси перебрасывает `/api` → `http://localhost:8000` — пока порт API не двигаешь, ничего больше править не нужно. Тёмная тема — по умолчанию, светлая включается через системное `prefers-color-scheme` или вручную: `<html data-theme="light">`.
+
+---
+
+## Smoke-прогон
+
+Самый быстрый способ убедиться, что всё работает:
+
+```bash
+# 1. listener в одном терминале
+uv run foundry run --once
+
+# 2. в другом терминале — создать issue + дождаться, пока его подхватят
+scripts/add-and-process.sh
+```
+
+[`scripts/add-and-process.sh`](scripts/add-and-process.sh) создаёт issue в `SOURCE_REPO`, ждёт появления его в `gh issue list --label`, и зовёт `foundry run`. Ожидаемый результат: в `TARGET_REPO` появился PR с новой строкой в `README.md` (если `CODING_AGENT=stub`) или с реальной реализацией (если `CODING_AGENT=claude_cli`).
+
+---
+
+## Тесты
+
+```bash
+uv run pytest                            # 134 passed (~3s, оффлайн)
+uv run pytest tests/test_pipeline.py -v
+```
+
+Все внешние вызовы (`gh`, git, claude CLI) замоканы — тесты не ходят в сеть и не плодят worktree'ы.
+
+Для фронта:
+
+```bash
+cd web
+npx tsc --noEmit                         # strict TS типы
+npm run build                            # tsc -b && vite build
+```
+
+---
+
+## Документация
+
+- [CLAUDE.md](CLAUDE.md) — карта проекта для агентов и людей: архитектура, конвенции, правила.
+- [DEBUG.md](DEBUG.md) — verified runbook: как поднимать REPL, мокать пайплайн, инспектить SQLite. Каждая команда здесь была реально выполнена.
+- [docs/architecture/skeleton.md](docs/architecture/skeleton.md) — что сделано в скелете.
+- [docs/architecture/draft.md](docs/architecture/draft.md) — исходный архитектурный набросок.
+- [docs/architecture/agent-protocol.md](docs/architecture/agent-protocol.md) — контракт между orchestrator'ом и coding-агентами.
+- [docs/specs/observability-ui.md](docs/specs/observability-ui.md), [docs/specs/observability-ui-plan.md](docs/specs/observability-ui-plan.md) — спецификация observability/UI слоя.
+- [IDEAS.md](IDEAS.md) — свалка будущих направлений (как есть, без додумывания).
+- [design_handoff_foundry_observability/](design_handoff_foundry_observability/) — hi-fi дизайн-референс UI.
