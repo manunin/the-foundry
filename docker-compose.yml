@@ -13,6 +13,7 @@ services:
       DB_PATH: /app/data/foundry.sqlite
       WORKTREE_ROOT: /app/worktrees
       PYTHONPATH: /app/src
+      CODEX_SANDBOX_MODE: ${CODEX_SANDBOX_MODE:-danger-full-access}
     volumes:
       - ./data:/app/data
       - ./worktrees:/app/worktrees
@@ -39,6 +40,7 @@ services:
       DB_PATH: /app/data/foundry.sqlite
       WORKTREE_ROOT: /app/worktrees
       PYTHONPATH: /app/src
+      CODEX_SANDBOX_MODE: ${CODEX_SANDBOX_MODE:-danger-full-access}
       GIT_AUTHOR_NAME: ${GIT_AUTHOR_NAME:-Foundry Bot}
       GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL:-foundry@example.local}
       GIT_COMMITTER_NAME: ${GIT_COMMITTER_NAME:-Foundry Bot}

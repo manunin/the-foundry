@@ -33,6 +33,7 @@ class AgentSettings:
     model: str = "haiku"
     db_path: Path | None = None
     safe_agent_mode: bool = True
+    sandbox_mode: str | None = None
 
     @classmethod
     def from_env(cls, stage: AgentStage, db_path: Path | None = None) -> AgentSettings:
@@ -52,6 +53,11 @@ class AgentSettings:
             os.getenv(f"AGENT_{key}_MAX_TURNS")
             or os.getenv("AGENT_MAX_TURNS", str(DEFAULT_MAX_TURNS[stage]))
         )
+        sandbox_mode = (
+            os.getenv(f"AGENT_{key}_SANDBOX_MODE")
+            or os.getenv("AGENT_SANDBOX_MODE")
+            or os.getenv("CODEX_SANDBOX_MODE")
+        )
         return cls(
             stage=stage,
             backend=os.getenv(f"AGENT_{key}_BACKEND") or os.getenv("CODING_AGENT", "stub"),
@@ -63,4 +69,5 @@ class AgentSettings:
                 os.getenv(f"AGENT_{key}_SAFE_MODE")
                 or os.getenv("SAFE_AGENT_MODE", "true")
             ),
+            sandbox_mode=sandbox_mode,
         )

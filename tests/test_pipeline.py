@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from foundry import pipeline, state
+from foundry.agents.streaming import CliProcessError
 from foundry.config import Settings
 from foundry.events import read_events
 from foundry.models import Stage, Task, TaskStatus
@@ -189,3 +190,70 @@ def test_run_once_stage_failure_marks_failed(tmp_path: Path) -> None:
     assert "stage_started" in implement_kinds
     assert "stage_failed" in implement_kinds
     assert "stage_finished" not in implement_kinds
+
+
+def test_agent_plan_cli_failure_does_not_continue_to_verify(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    state.init_db(settings.db_path)
+    seeded = _seed_task(settings.db_path)
+
+    with patch("foundry.pipeline.fetch_stage.fetch", return_value=[seeded]), \
+         patch("foundry.workflows.worktree.ensure_base_repo", return_value=tmp_path / "base"), \
+         patch(
+             "foundry.workflows.worktree.create_worktree",
+             return_value=(tmp_path / "wt", "foundry/task-1"),
+         ), \
+         patch(
+             "foundry.workflows.agent_plan_stage.run",
+             side_effect=CliProcessError(
+                 ["codex"],
+                 1,
+                 "bwrap: No permissions to create a new namespace",
+             ),
+         ):
+        processed = pipeline.run_once(settings)
+
+    final = state.get_task(settings.db_path, processed[0].id)
+    assert final.status == TaskStatus.PENDING
+    assert final.current_stage == Stage.FETCH
+
+    events = read_events(settings.db_path, task_id=final.id)
+    plan_kinds = [e.kind for e in events if e.stage == "plan"]
+    assert "stage_started" in plan_kinds
+    assert "stage_failed" in plan_kinds
+    assert "stage_finished" not in plan_kinds
+    assert not [e for e in events if e.stage in {"implement", "verify"}]
+
+
+def test_run_once_repairs_stale_persisted_worktree_path(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    state.init_db(settings.db_path)
+    seeded = _seed_task(settings.db_path)
+    seeded.worktree_path = f"/Users/dev/project/worktrees/task-{seeded.id}"
+    seeded.branch_name = f"foundry/task-{seeded.id}"
+    seeded = state.upsert_task(settings.db_path, seeded)
+
+    wt = tmp_path / "worktrees" / f"task-{seeded.id}"
+    wt.mkdir(parents=True)
+
+    with patch("foundry.pipeline.fetch_stage.fetch", return_value=[seeded]), \
+         patch("foundry.workflows.worktree.ensure_base_repo", return_value=tmp_path / "base"), \
+         patch("foundry.workflows.worktree.create_worktree") as create_worktree, \
+         patch("foundry.workflows.worktree.cleanup_worktree"), \
+         patch(
+             "foundry.workflows.security.checkpoint_diff",
+             return_value=tmp_path / "data" / "checkpoints" / "snap.diff",
+         ), \
+         patch("foundry.workflows.agent_plan_stage.run", return_value={"plan": "", "summary": ""}), \
+         patch("foundry.workflows.agent_implement_stage.run", return_value={"applied": []}), \
+         patch("foundry.workflows.verify_stage.run", return_value={"passed": True}), \
+         patch(
+             "foundry.workflows.pr_stage.run",
+             return_value={"pr_url": "https://example/pr/1", "branch": seeded.branch_name},
+         ):
+        processed = pipeline.run_once(settings)
+
+    create_worktree.assert_not_called()
+    final = state.get_task(settings.db_path, processed[0].id)
+    assert final.worktree_path == str(wt.resolve())
+    assert final.status == TaskStatus.DONE

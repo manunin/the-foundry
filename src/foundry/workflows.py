@@ -396,6 +396,43 @@ def _block_for_human(
     return state.upsert_task(settings.db_path, task)
 
 
+def _prepare_dev_worktree(settings: Settings, task: Task, base: Path) -> tuple[Task, Path, str]:
+    """Return a usable task worktree, repairing stale persisted paths.
+
+    Task rows can outlive the process that created them. In Docker, an older
+    host path such as `/Users/.../worktrees/task-1` is not valid inside the
+    container even though the same volume is mounted at `/app/worktrees`.
+    Prefer the canonical path under the current `WORKTREE_ROOT` before creating
+    a fresh worktree.
+    """
+    if task.id is None:
+        raise RuntimeError("task must be persisted before preparing a worktree")
+
+    if task.worktree_path and task.branch_name:
+        stored_path = Path(task.worktree_path)
+        if stored_path.exists():
+            return task, stored_path, task.branch_name
+
+        canonical_path = (settings.worktree_root / f"task-{task.id}").resolve()
+        if canonical_path.exists():
+            task.worktree_path = str(canonical_path)
+            task = state.upsert_task(settings.db_path, task)
+            return task, canonical_path, task.branch_name
+
+        log.warning(
+            "workflow.dev_task.stale_worktree_path",
+            task_id=task.id,
+            stored_path=str(stored_path),
+            expected_path=str(canonical_path),
+        )
+
+    wt_path, branch_name = worktree.create_worktree(settings.worktree_root, task.id)
+    task.worktree_path = str(wt_path)
+    task.branch_name = branch_name
+    task = state.upsert_task(settings.db_path, task)
+    return task, wt_path, branch_name
+
+
 @observe(name="workflow.dev_task")
 def dev_task(settings: Settings, task: Task) -> Task:
     """Issue-driven development workflow.
@@ -422,14 +459,7 @@ def dev_task(settings: Settings, task: Task) -> Task:
     _emit_synthetic_fetch_events(settings, task)
 
     base = worktree.ensure_base_repo(settings.worktree_root, settings.source_repo)
-    if task.worktree_path and task.branch_name:
-        wt_path = Path(task.worktree_path)
-        branch_name = task.branch_name
-    else:
-        wt_path, branch_name = worktree.create_worktree(settings.worktree_root, task.id)
-        task.worktree_path = str(wt_path)
-        task.branch_name = branch_name
-        task = state.upsert_task(settings.db_path, task)
+    task, wt_path, branch_name = _prepare_dev_worktree(settings, task, base)
 
     # CONTEXT
     ctx = state.get_stage_result(settings.db_path, task.id, Stage.CONTEXT)

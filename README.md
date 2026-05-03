@@ -104,6 +104,7 @@ AGENT_IMPLEMENT_MAX_TURNS=40
 Foundry изолирует каждую задачу в отдельный git worktree, но это не полноценная security sandbox. Реальные CLI-агенты умеют запускать shell-команды, читать доступные им файлы и пользоваться переданными им credentials. Поэтому дефолт теперь консервативный:
 
 - `SAFE_AGENT_MODE=true` по умолчанию: Claude запускается без `--dangerously-skip-permissions`, Codex — без `--dangerously-bypass-approvals-and-sandbox`;
+- `CODEX_SANDBOX_MODE` можно использовать для явного режима Codex sandbox (`read-only`, `workspace-write`, `danger-full-access`); в Docker Compose по умолчанию стоит `danger-full-access`, потому что bubblewrap/user namespace sandbox часто недоступен внутри контейнера (`bwrap: No permissions to create a new namespace`), а внешней границей изоляции выступает сам контейнер;
 - env для agent subprocess scrubbed: передаются только базовые runtime-переменные (`PATH`, `HOME`, `SSH_AUTH_SOCK`, locale и т.п.), backend auth key и явный `AGENT_ENV_ALLOWLIST`;
 - собственные shell-вызовы Foundry проходят denylist для `rm -rf`, `git push --force`, `git checkout main` в task worktree и `git reset --hard` вне task worktree;
 - перед каждой новой implement-попыткой сохраняется `git diff --binary HEAD` в `data/checkpoints/`, а retry делает `git reset --hard HEAD` внутри task worktree перед новой попыткой;

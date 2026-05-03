@@ -119,6 +119,8 @@ class CodexCliAgent:
         ]
         if not self._settings.safe_agent_mode:
             flags.insert(1, "--dangerously-bypass-approvals-and-sandbox")
+        elif self._settings.sandbox_mode:
+            flags += ["--sandbox", self._settings.sandbox_mode]
         if self._settings.model:
             flags += ["-m", self._settings.model]
         return flags

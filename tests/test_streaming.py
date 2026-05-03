@@ -5,7 +5,11 @@ from typing import Any
 
 import pytest
 
-from foundry.agents.streaming import _normalize_tool_event, iter_cli_jsonl
+from foundry.agents.streaming import (
+    CliProcessError,
+    _normalize_tool_event,
+    iter_cli_jsonl,
+)
 
 
 class _FakePopen:
@@ -64,14 +68,15 @@ def test_iter_cli_jsonl_skips_invalid_lines(monkeypatch: pytest.MonkeyPatch) -> 
     assert [e["type"] for e in got] == ["a", "b"]
 
 
-def test_iter_cli_jsonl_logs_nonzero_exit_but_yields(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_iter_cli_jsonl_raises_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     lines = ['{"type": "a"}\n']
     _install_fake_popen(monkeypatch, _FakePopen(lines, returncode=1, stderr="boom"))
 
-    got = list(iter_cli_jsonl(["fake"]))
+    with pytest.raises(CliProcessError, match="fake exited with code 1: boom") as exc:
+        list(iter_cli_jsonl(["fake"]))
 
-    # Non-zero exit does not raise — we still get what we parsed.
-    assert got == [{"type": "a"}]
+    assert exc.value.returncode == 1
+    assert exc.value.stderr == "boom"
 
 
 def test_normalize_tool_event_read_uses_file_path() -> None:

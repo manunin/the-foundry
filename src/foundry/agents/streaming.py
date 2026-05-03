@@ -11,6 +11,21 @@ log = structlog.get_logger(__name__)
 
 MAX_TOOL_DETAIL_LEN = 100
 
+
+class CliProcessError(RuntimeError):
+    """Raised when a streamed CLI process exits unsuccessfully."""
+
+    def __init__(self, cmd: list[str], returncode: int, stderr: str = "") -> None:
+        self.cmd = cmd
+        self.returncode = returncode
+        self.stderr = stderr
+        cmd_name = cmd[0] if cmd else "<unknown>"
+        detail = stderr.strip()
+        message = f"{cmd_name} exited with code {returncode}"
+        if detail:
+            message = f"{message}: {detail}"
+        super().__init__(message)
+
 # Per-tool mapping: which key in tool `input` carries a short human-readable
 # detail. Kept in sync with the reference parser in myagent's telegram_ui.
 _TOOL_DETAIL_KEYS: dict[str, tuple[str, ...]] = {
@@ -43,9 +58,10 @@ def iter_cli_jsonl(
     empty lines are logged at warning level and skipped — never raises on
     parse failure.
 
-    On process exit: stderr is drained and logged if the exit code is
-    non-zero; pipes are closed. Subprocess-level failures (spawn error, etc.)
-    propagate to the caller.
+    On process exit: stderr is drained and non-zero exits raise
+    `CliProcessError`; subprocess-level failures (spawn error, etc.) propagate
+    to the caller. This keeps agent failures from being mistaken for a clean
+    empty response by the workflow.
     """
     proc = subprocess.Popen(
         cmd,
@@ -92,6 +108,8 @@ def iter_cli_jsonl(
             proc.stdout.close()
         if proc.stderr is not None:
             proc.stderr.close()
+        if returncode != 0:
+            raise CliProcessError(cmd, returncode, stderr_text)
 
 
 def _normalize_tool_event(raw: dict[str, Any]) -> dict[str, Any]:

@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from foundry.agents import AgentSettings, AgentStage, AgentTask
 from foundry.agents.codex_cli import CodexCliAgent
+from foundry.agents.streaming import CliProcessError
 from foundry.events import read_events
 from foundry.state import init_db
 
@@ -113,6 +114,37 @@ def test_apply_can_opt_into_unsafe_codex_flag(tmp_path: Path) -> None:
         agent.apply(task=_task(), worktree=tmp_path, input="")
 
     assert "--dangerously-bypass-approvals-and-sandbox" in run.call_args.args[0]
+
+
+def test_apply_passes_configured_codex_sandbox_mode(tmp_path: Path) -> None:
+    agent = CodexCliAgent(settings=_settings(sandbox_mode="danger-full-access"))
+
+    with patch(
+        "foundry.agents.codex_cli.iter_cli_jsonl",
+        return_value=iter(
+            [{"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}}]
+        ),
+    ) as run:
+        agent.apply(task=_task(), worktree=tmp_path, input="")
+
+    cmd = run.call_args.args[0]
+    assert cmd[cmd.index("--sandbox") + 1] == "danger-full-access"
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+
+
+def test_apply_propagates_cli_process_failures(tmp_path: Path) -> None:
+    agent = CodexCliAgent(settings=_settings())
+
+    with patch(
+        "foundry.agents.codex_cli.iter_cli_jsonl",
+        side_effect=CliProcessError(["codex"], 1, "bwrap: No permissions to create a new namespace"),
+    ):
+        try:
+            agent.apply(task=_task(), worktree=tmp_path, input="")
+        except CliProcessError as exc:
+            assert "bwrap" in str(exc)
+        else:
+            raise AssertionError("expected CliProcessError")
 
 
 def test_extract_usage_from_turn_completed() -> None:
