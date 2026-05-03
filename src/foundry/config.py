@@ -21,10 +21,18 @@ class Settings:
     db_path: Path
     poll_interval_seconds: int
     github_token: str | None = None
+    issue_assignee: str | None = None
+    issue_milestone: str | None = None
+    issue_labels: tuple[str, ...] = ()
+    issue_limit: int = 50
     max_implement_attempts: int = 2
     verify_commands: tuple[tuple[str, ...], ...] | None = None
     verify_command_timeout_sec: int = 300
     verify_diff_max_bytes: int = 200_000
+
+
+def _parse_csv(raw: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
 def _parse_verify_commands(raw: str) -> tuple[tuple[str, ...], ...] | None:
@@ -67,15 +75,23 @@ def load_settings(env_path: Path | None = None) -> Settings:
         raise ConfigError("SOURCE_REPO and TARGET_REPO must be set (owner/name)")
 
     token = os.environ.get("GITHUB_TOKEN", "").strip() or None
+    issue_label = os.environ.get("ISSUE_LABEL", "agent-task").strip()
+    issue_labels = _parse_csv(os.environ.get("ISSUE_LABELS", issue_label))
+    issue_assignee = os.environ.get("ISSUE_ASSIGNEE", "").strip() or None
+    issue_milestone = os.environ.get("ISSUE_MILESTONE", "").strip() or None
 
     return Settings(
         source_repo=source_repo,
         target_repo=target_repo,
-        issue_label=os.environ.get("ISSUE_LABEL", "agent-task").strip(),
+        issue_label=issue_label,
         worktree_root=Path(os.environ.get("WORKTREE_ROOT", "./worktrees")).resolve(),
         db_path=Path(os.environ.get("DB_PATH", "./data/foundry.sqlite")).resolve(),
         poll_interval_seconds=int(os.environ.get("POLL_INTERVAL_SECONDS", "30")),
         github_token=token,
+        issue_assignee=issue_assignee,
+        issue_milestone=issue_milestone,
+        issue_labels=issue_labels,
+        issue_limit=int(os.environ.get("ISSUE_LIMIT", "50")),
         max_implement_attempts=int(os.environ.get("MAX_IMPLEMENT_ATTEMPTS", "2")),
         verify_commands=_parse_verify_commands(os.environ.get("VERIFY_COMMANDS", "")),
         verify_command_timeout_sec=int(

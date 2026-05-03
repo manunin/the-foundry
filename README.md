@@ -78,6 +78,11 @@ Stub-режим хорош для smoke-теста (оффлайн, детерм
 SOURCE_REPO=your-org/the-foundry-sandbox
 TARGET_REPO=your-org/the-foundry-sandbox
 ISSUE_LABEL=agent-task
+# Optional: narrow or split the queue without changing code.
+# ISSUE_LABELS=agent-task,queue/backend
+# ISSUE_ASSIGNEE=octocat
+# ISSUE_MILESTONE=v1
+# ISSUE_LIMIT=50
 
 # Coding agent — Claude CLI на подписке (OAuth) или ANTHROPIC_API_KEY
 CODING_AGENT=claude_cli
@@ -174,9 +179,12 @@ uv run foundry pr-feedback --once        # один проход по review/CI 
 Каждый проход: `fetch labeled issues → context → plan → implement → verify → pr` для каждой задачи. Результат каждой стадии пишется в `task_events` (SQLite) — UI читает оттуда. Дополнительные команды:
 
 ```bash
+uv run foundry run-issue <number>        # ручной запуск одного issue без фильтров polling-очереди
 uv run foundry status                    # таблица всех задач из БД
 uv run foundry reset <task_id>           # вернуть задачу в PENDING/FETCH (для отладки)
 ```
+
+Выборка issue остаётся простой: `foundry run` вызывает `gh issue list` по `SOURCE_REPO`, `ISSUE_LABELS`/`ISSUE_LABEL`, `ISSUE_ASSIGNEE`, `ISSUE_MILESTONE`, `ISSUE_LIMIT`, затем upsert'ит найденное в SQLite. Лейблы `priority/p0` и `priority/p1` только поднимают задачи выше внутри текущего прохода. Таблица SQLite `tasks` здесь фактически и есть очередь: pending/running-записи переживают рестарт и подхватываются следующим запуском.
 
 ### 2. Backend API (FastAPI)
 

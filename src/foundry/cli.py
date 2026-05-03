@@ -73,6 +73,22 @@ def run(once: bool, interval: int | None) -> None:
         click.echo("foundry: stopped")
 
 
+@main.command("run-issue")
+@click.argument("number", type=int)
+def run_issue(number: int) -> None:
+    """Run one GitHub issue now, bypassing the polling queue filters."""
+    try:
+        settings = load_settings()
+    except ConfigError as e:
+        click.echo(f"config error: {e}", err=True)
+        sys.exit(2)
+
+    task = pipeline.run_issue(settings, number)
+    click.echo(
+        f"#{task.issue_number:>4}  {task.status.value:<8}  {task.current_stage.value:<10}  {task.pr_url or '-'}"
+    )
+
+
 @main.command("pr-feedback")
 @click.option("--once", is_flag=True, help="Run a single PR feedback pass and exit.")
 def pr_feedback(once: bool) -> None:

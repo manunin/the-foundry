@@ -18,17 +18,7 @@ log = structlog.get_logger()
 PRE_IMPLEMENT_STAGES = {Stage.FETCH, Stage.CONTEXT, Stage.PLAN}
 
 
-def run_once(settings: Settings) -> list[Task]:
-    """Fetch pending tasks and run each through the `dev_task` workflow.
-
-    Failures in one task do not stop the batch — they're persisted and the next
-    task proceeds. Returns the final list of tasks touched in this run.
-    """
-    observability.init_langfuse()
-    state.init_db(settings.db_path)
-    tasks = fetch_stage.fetch(settings)
-    log.info("run.fetched", count=len(tasks))
-
+def _process_tasks(settings: Settings, tasks: list[Task]) -> list[Task]:
     processed: list[Task] = []
     for task in tasks:
         try:
@@ -62,5 +52,31 @@ def run_once(settings: Settings) -> list[Task]:
                 )
             state.upsert_task(settings.db_path, task)
             processed.append(task)
+    return processed
+
+
+def run_once(settings: Settings) -> list[Task]:
+    """Fetch pending tasks and run each through the `dev_task` workflow.
+
+    Failures in one task do not stop the batch — they're persisted and the next
+    task proceeds. Returns the final list of tasks touched in this run.
+    """
+    observability.init_langfuse()
+    state.init_db(settings.db_path)
+    tasks = fetch_stage.fetch(settings)
+    log.info("run.fetched", count=len(tasks))
+
+    processed = _process_tasks(settings, tasks)
     observability.flush()
     return processed
+
+
+def run_issue(settings: Settings, issue_number: int) -> Task:
+    """Run one issue immediately, without changing the polling query."""
+    observability.init_langfuse()
+    state.init_db(settings.db_path)
+    task = fetch_stage.fetch_issue(settings, issue_number)
+    log.info("run_issue.fetched", issue_number=issue_number, task_id=task.id)
+    processed = _process_tasks(settings, [task])
+    observability.flush()
+    return processed[0]
