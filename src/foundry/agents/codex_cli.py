@@ -52,7 +52,7 @@ class CodexCliAgent:
             cmd = self._fresh_cmd(worktree, prompt)
         else:
             prompt = input
-            cmd = self._resume_cmd(worktree, resume_id, prompt)
+            cmd = self._resume_cmd(resume_id, prompt)
 
         with observability.track_generation(
             name="llm.codex_cli",
@@ -108,7 +108,7 @@ class CodexCliAgent:
             self._sessions[task.id] = session_id
         return session_id
 
-    def _base_flags(self, worktree: Path) -> list[str]:
+    def _fresh_flags(self, worktree: Path) -> list[str]:
         flags = [
             "--json",
             "--skip-git-repo-check",
@@ -123,13 +123,24 @@ class CodexCliAgent:
             flags += ["-m", self._settings.model]
         return flags
 
-    def _fresh_cmd(self, worktree: Path, prompt: str) -> list[str]:
-        return ["codex", "exec", *self._base_flags(worktree), prompt]
+    def _resume_flags(self) -> list[str]:
+        flags = [
+            "--json",
+            "--skip-git-repo-check",
+        ]
+        if not self._settings.safe_agent_mode:
+            flags.insert(1, "--dangerously-bypass-approvals-and-sandbox")
+        if self._settings.model:
+            flags += ["-m", self._settings.model]
+        return flags
 
-    def _resume_cmd(self, worktree: Path, session_id: str, prompt: str) -> list[str]:
+    def _fresh_cmd(self, worktree: Path, prompt: str) -> list[str]:
+        return ["codex", "exec", *self._fresh_flags(worktree), prompt]
+
+    def _resume_cmd(self, session_id: str, prompt: str) -> list[str]:
         return [
             "codex", "exec", "resume",
-            *self._base_flags(worktree),
+            *self._resume_flags(),
             session_id,
             prompt,
         ]

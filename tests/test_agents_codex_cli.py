@@ -80,6 +80,8 @@ def test_apply_uses_exec_for_fresh_and_resume_subcommand_next(tmp_path: Path) ->
     assert "resume" not in fresh_cmd
     assert resume_cmd[:3] == ["codex", "exec", "resume"]
     assert "tid-9" in resume_cmd
+    assert "-C" not in resume_cmd
+    assert run.call_args_list[1].kwargs["cwd"] == tmp_path
 
 
 def test_apply_passes_model_and_worktree_to_cli(tmp_path: Path) -> None:
@@ -124,6 +126,23 @@ def test_apply_passes_configured_codex_sandbox_mode(tmp_path: Path) -> None:
     cmd = run.call_args.args[0]
     assert cmd[cmd.index("--sandbox") + 1] == "danger-full-access"
     assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+
+
+def test_apply_omits_unsupported_resume_sandbox_flag(tmp_path: Path) -> None:
+    agent = CodexCliAgent(settings=_settings(sandbox_mode="danger-full-access"))
+    task = _task(task_id=9)
+    agent._sessions[task.id] = "tid-9"
+
+    with patch(
+        "foundry.agents.codex_cli.iter_cli_jsonl_with_retry",
+        return_value=[{"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}}],
+    ) as run:
+        agent.apply(task=task, worktree=tmp_path, input="resume")
+
+    cmd = run.call_args.args[0]
+    assert cmd[:3] == ["codex", "exec", "resume"]
+    assert "--sandbox" not in cmd
+    assert run.call_args.kwargs["cwd"] == tmp_path
 
 
 def test_apply_propagates_cli_process_failures(tmp_path: Path) -> None:
