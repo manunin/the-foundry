@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Foundry — Architecture</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --accent: #f97316;
+    --accent2: #3b82f6;
+    --accent3: #22c55e;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --tag-bg: #21262d;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Slides */
+  .slides { flex: 1; position: relative; overflow: hidden; }
+
+  .slide {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    padding: 48px 64px;
+    opacity: 0; transform: translateX(60px);
+    transition: opacity .4s ease, transform .4s ease;
+    pointer-events: none;
+  }
+  .slide.active {
+    opacity: 1; transform: translateX(0);
+    pointer-events: auto;
+  }
+  .slide.prev {
+    opacity: 0; transform: translateX(-60px);
+  }
+
+  h1 { font-size: 2.2rem; font-weight: 700; letter-spacing: -.02em; }
+  h2 { font-size: 1.5rem; font-weight: 600; margin-bottom: 28px; }
+  .sub { color: var(--muted); font-size: 1rem; margin-top: 8px; margin-bottom: 32px; }
+  .accent { color: var(--accent); }
+  .accent2 { color: var(--accent2); }
+  .accent3 { color: var(--accent3); }
+
+  /* ── Slide 1 ── */
+  .hero { display: flex; gap: 48px; flex: 1; align-items: flex-start; }
+
+  .tagline {
+    font-size: 1.05rem;
+    line-height: 1.7;
+    color: var(--muted);
+    max-width: 420px;
+    flex-shrink: 0;
+  }
+
+  .layers {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .layer {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .layer-icon {
+    width: 36px; height: 36px;
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.1rem;
+    flex-shrink: 0;
+  }
+  .layer-info { flex: 1; }
+  .layer-name { font-weight: 600; font-size: .95rem; }
+  .layer-desc { font-size: .8rem; color: var(--muted); margin-top: 2px; }
+  .layer-badge {
+    font-size: .72rem;
+    background: var(--tag-bg);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 3px 10px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  /* ── Slide 2 ── */
+  .pipeline-wrap { flex: 1; display: flex; flex-direction: column; gap: 12px; }
+
+  .stage-row {
+    display: flex;
+    align-items: center;
+    gap: 0;
+  }
+  .stage-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 18px;
+    min-width: 110px;
+    text-align: center;
+  }
+  .stage-box .num {
+    font-size: .68rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .08em;
+  }
+  .stage-box .name {
+    font-weight: 700;
+    font-size: .9rem;
+    margin-top: 2px;
+  }
+  .stage-arrow {
+    font-size: 1.1rem;
+    color: var(--border);
+    margin: 0 6px;
+  }
+  .stage-detail {
+    background: var(--tag-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: .78rem;
+    color: var(--muted);
+    flex: 1;
+    margin-left: 10px;
+    line-height: 1.5;
+  }
+  .stage-detail strong { color: var(--text); font-weight: 600; }
+
+  .retry-note {
+    background: #1a1208;
+    border: 1px solid #6b3a0d;
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: .8rem;
+    color: #fb923c;
+    margin-top: 4px;
+  }
+
+  /* ── Slide 3 ── */
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; flex: 1; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 22px;
+  }
+  .card-title {
+    font-size: .8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--muted);
+    margin-bottom: 14px;
+  }
+  .pill-list { display: flex; flex-wrap: wrap; gap: 7px; }
+  .pill {
+    font-size: .78rem;
+    background: var(--tag-bg);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 4px 12px;
+    color: var(--text);
+  }
+  .pill.orange { border-color: #7c2d12; color: #fb923c; background: #1a0f07; }
+  .pill.blue   { border-color: #1e3a5f; color: #60a5fa; background: #0a1628; }
+  .pill.green  { border-color: #14532d; color: #4ade80; background: #071a0f; }
+  .pill.purple { border-color: #3b1a5e; color: #c084fc; background: #130a22; }
+
+  .db-row {
+    font-size: .8rem;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .db-row:last-child { border-bottom: none; }
+  .db-row .tbl { color: var(--text); font-family: monospace; font-size: .77rem; }
+  .db-row .desc { color: var(--muted); text-align: right; }
+
+  .sec-row {
+    font-size: .79rem;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
+    line-height: 1.4;
+  }
+  .sec-row:last-child { border-bottom: none; }
+  .sec-row .key { color: #f87171; font-weight: 600; }
+
+  /* ── Nav ── */
+  nav {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 20px;
+    padding: 16px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--border);
+    cursor: pointer;
+    transition: background .2s;
+  }
+  .dot.active { background: var(--accent); }
+  button {
+    background: var(--tag-bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 7px 20px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: .85rem;
+    transition: border-color .2s, background .2s;
+  }
+  button:hover { border-color: var(--accent); background: #1f1208; }
+  button:disabled { opacity: .35; cursor: default; }
+  .slide-num { color: var(--muted); font-size: .82rem; min-width: 48px; text-align: center; }
+</style>
+</head>
+<body>
+
+<div class="slides">
+
+  <!-- ═══════════ SLIDE 1: Overview ═══════════ -->
+  <div class="slide active" id="s1">
+    <h1>The <span class="accent">Foundry</span></h1>
+    <p class="sub">Agentic Feature Pipeline · GitHub Issue → PR</p>
+
+    <div class="hero">
+      <div class="tagline">
+        Оркестратор, который берёт GitHub Issue и автоматически проводит его через
+        полный цикл разработки: анализ контекста, планирование, реализацию, верификацию
+        и открытие PR.
+        <br><br>
+        Каждая задача исполняется в изолированном git-worktree. Всё состояние хранится
+        в append-only SQLite. Прогресс переживает рестарты процессов.
+      </div>
+
+      <div class="layers">
+        <div class="layer">
+          <div class="layer-icon" style="background:#1a1208">🌐</div>
+          <div class="layer-info">
+            <div class="layer-name accent2">Web UI</div>
+            <div class="layer-desc">React 19 + Vite + TanStack Query · :5173</div>
+          </div>
+          <div class="layer-badge">live SSE stream</div>
+        </div>
+
+        <div class="layer">
+          <div class="layer-icon" style="background:#0a1628">⚡</div>
+          <div class="layer-info">
+            <div class="layer-name accent2">HTTP API</div>
+            <div class="layer-desc">FastAPI · /api/tasks · /api/tasks/{id}/events · :8000</div>
+          </div>
+          <div class="layer-badge">SSE · projections</div>
+        </div>
+
+        <div class="layer">
+          <div class="layer-icon" style="background:#071a0f">🔁</div>
+          <div class="layer-info">
+            <div class="layer-name accent3">Pipeline / Listener</div>
+            <div class="layer-desc">foundry CLI · FSM: FETCH → CONTEXT → PLAN → IMPLEMENT → VERIFY → PR → DONE</div>
+          </div>
+          <div class="layer-badge">retry · checkpoints</div>
+        </div>
+
+        <div class="layer">
+          <div class="layer-icon" style="background:#130a22">🤖</div>
+          <div class="layer-info">
+            <div class="layer-name" style="color:#c084fc">Coding Agents</div>
+            <div class="layer-desc">stub · claude_cli · codex_cli · opencode_cli</div>
+          </div>
+          <div class="layer-badge">pluggable</div>
+        </div>
+
+        <div class="layer">
+          <div class="layer-icon" style="background:#1a1208">🗄</div>
+          <div class="layer-info">
+            <div class="layer-name accent">SQLite</div>
+            <div class="layer-desc">tasks · task_events · stage_results · repo_memory · agent_sessions</div>
+          </div>
+          <div class="layer-badge">append-only</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ SLIDE 2: Pipeline FSM ═══════════ -->
+  <div class="slide" id="s2">
+    <h2>Pipeline — линейный <span class="accent">FSM</span></h2>
+
+    <div class="pipeline-wrap">
+
+      <div class="stage-row">
+        <div class="stage-box">
+          <div class="num">01</div>
+          <div class="name accent2">FETCH</div>
+        </div>
+        <div class="stage-arrow">→</div>
+        <div class="stage-detail">
+          <strong>gh issue list</strong> по SOURCE_REPO + ISSUE_LABELS/ASSIGNEE/MILESTONE.
+          Сортировка по <strong>priority/p0 → p1</strong>. Upsert в SQLite.
+        </div>
+      </div>
+
+      <div class="stage-row">
+        <div class="stage-box">
+          <div class="num">02</div>
+          <div class="name accent2">CONTEXT</div>
+        </div>
+        <div class="stage-arrow">→</div>
+        <div class="stage-detail">
+          Анализирует worktree: языки, манифесты, релевантные файлы (TF-IDF).
+          Читает <strong>repo_memory</strong> — touched_files, verify_commands, common_failures.
+        </div>
+      </div>
+
+      <div class="stage-row">
+        <div class="stage-box">
+          <div class="num">03</div>
+          <div class="name" style="color:#c084fc">PLAN</div>
+        </div>
+        <div class="stage-arrow">→</div>
+        <div class="stage-detail">
+          Агент генерирует план. Маркер <strong>NEED_VERIFICATION</strong> → <span class="accent">BLOCKED</span>:
+          комментарий в issue, задача ждёт ответа человека.
+        </div>
+      </div>
+
+      <div class="stage-row">
+        <div class="stage-box">
+          <div class="num">04</div>
+          <div class="name" style="color:#c084fc">IMPLEMENT</div>
+        </div>
+        <div class="stage-arrow">→</div>
+        <div class="stage-detail">
+          Агент пишет код в изолированном worktree. Checkpoint: <strong>git diff → data/checkpoints/</strong>.
+          До каждой retry-попытки — <strong>git reset --hard HEAD</strong>.
+        </div>
+      </div>
+
+      <div class="stage-row">
+        <div class="stage-box">
+          <div class="num">05</div>
+          <div class="name accent3">VERIFY</div>
+        </div>
+        <div class="stage-arrow">→</div>
+        <div class="stage-detail">
+          ① <strong>Детерм.</strong>: pytest / ruff / npm test / cargo test — short-circuit при ненулевом exit.
+          ② <strong>LLM-ревьюер</strong>: анализирует git diff, возвращает PASS / FAIL / UNCLEAR.
+        </div>
+      </div>
+
+      <div class="stage-row">
+        <div class="stage-box">
+          <div class="num">06</div>
+          <div class="name accent">PR</div>
+        </div>
+        <div class="stage-arrow">→</div>
+        <div class="stage-detail">
+          git commit → push foundry/task-{id} → <strong>gh pr create</strong>.
+          Закрывает issue комментарием со ссылкой на PR.
+        </div>
+      </div>
+
+      <div class="retry-note">
+        ↻ <strong>Retry-цикл</strong> (шаги 4–5): до MAX_IMPLEMENT_ATTEMPTS=2 попыток.
+        Каждая следующая получает план + отчёт предыдущей верификации.
+        BLOCKED → возобновляется через <code>POST /api/tasks/{id}/resume</code>.
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ SLIDE 3: Tech & Security ═══════════ -->
+  <div class="slide" id="s3">
+    <h2>Стек, хранилище и <span class="accent">безопасность</span></h2>
+
+    <div class="grid3">
+
+      <div class="card">
+        <div class="card-title">Технологии</div>
+        <div class="pill-list">
+          <span class="pill orange">Python 3.11+</span>
+          <span class="pill orange">FastAPI</span>
+          <span class="pill orange">Click CLI</span>
+          <span class="pill blue">React 19</span>
+          <span class="pill blue">TypeScript</span>
+          <span class="pill blue">Vite</span>
+          <span class="pill green">SQLite</span>
+          <span class="pill green">structlog</span>
+          <span class="pill green">Langfuse (опц.)</span>
+          <span class="pill purple">claude_cli</span>
+          <span class="pill purple">codex_cli</span>
+          <span class="pill purple">opencode_cli</span>
+          <span class="pill">Docker Compose</span>
+          <span class="pill">uv</span>
+          <span class="pill">gh CLI</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">SQLite — таблицы</div>
+        <div class="db-row">
+          <span class="tbl">tasks</span>
+          <span class="desc">статус, стадия, worktree path, branch, pr_url</span>
+        </div>
+        <div class="db-row">
+          <span class="tbl">task_events</span>
+          <span class="desc">append-only лог: stage_started/finished, agent_tool</span>
+        </div>
+        <div class="db-row">
+          <span class="tbl">stage_results</span>
+          <span class="desc">input/output каждой стадии, per-attempt</span>
+        </div>
+        <div class="db-row">
+          <span class="tbl">repo_memory</span>
+          <span class="desc">долгосрочная память: файлы, тест-команды, сбои</span>
+        </div>
+        <div class="db-row">
+          <span class="tbl">agent_sessions</span>
+          <span class="desc">session_id claude_cli для resume</span>
+        </div>
+      </div>
+
+      <div class="card" style="grid-column: span 2;">
+        <div class="card-title">Безопасность и изоляция</div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap: 0 24px;">
+          <div>
+            <div class="sec-row"><span class="key">git worktree</span> — каждая задача в своём worktrees/task-{id}, основная ветка недоступна агенту</div>
+            <div class="sec-row"><span class="key">Denylist команд</span> — rm -rf, git push --force, git checkout main, git reset --hard вне worktree → исключение</div>
+            <div class="sec-row"><span class="key">SAFE_AGENT_MODE=true</span> — Claude без --dangerously-skip-permissions, Codex без bypass-sandbox</div>
+          </div>
+          <div>
+            <div class="sec-row"><span class="key">Env scrubbing</span> — subprocess агента получает только базовый allowlist + ключ конкретного backend</div>
+            <div class="sec-row"><span class="key">Sanity check PR</span> — отказ commit если &gt;40 файлов или затронуты .venv/ / __pycache__</div>
+            <div class="sec-row"><span class="key">Checkpoints</span> — git diff до каждой попытки в data/checkpoints/; failed worktree не удаляется</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div><!-- /slides -->
+
+<nav>
+  <button id="prev" disabled onclick="go(-1)">← Назад</button>
+  <div style="display:flex;gap:8px;align-items:center">
+    <div class="dot active" onclick="goTo(0)"></div>
+    <div class="dot" onclick="goTo(1)"></div>
+    <div class="dot" onclick="goTo(2)"></div>
+  </div>
+  <span class="slide-num" id="num">1 / 3</span>
+  <button id="next" onclick="go(1)">Вперёд →</button>
+</nav>
+
+<script>
+  const slides = document.querySelectorAll('.slide');
+  const dots = document.querySelectorAll('.dot');
+  let cur = 0;
+
+  function goTo(n) {
+    slides[cur].classList.remove('active');
+    slides[cur].classList.add('prev');
+    setTimeout(() => slides[cur].classList.remove('prev'), 400);
+    cur = n;
+    slides[cur].classList.add('active');
+    dots.forEach((d, i) => d.classList.toggle('active', i === cur));
+    document.getElementById('num').textContent = `${cur + 1} / ${slides.length}`;
+    document.getElementById('prev').disabled = cur === 0;
+    document.getElementById('next').disabled = cur === slides.length - 1;
+  }
+
+  function go(d) { goTo(Math.max(0, Math.min(slides.length - 1, cur + d))); }
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') go(1);
+    if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')   go(-1);
+  });
+</script>
+</body>
+</html>
