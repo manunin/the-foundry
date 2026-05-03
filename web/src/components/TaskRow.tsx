@@ -4,7 +4,7 @@ import { ChevronRight } from "lucide-react";
 import type { UiTask } from "../api";
 import { projectLiveTask } from "../liveTaskProjection";
 import { useTaskStream } from "../useTaskStream";
-import { formatCost, formatDurationMs, formatTokens } from "../utils";
+import { formatDurationMs, formatTokens } from "../utils";
 import StatusChip from "./StatusChip";
 import StageStepper from "./StageStepper";
 import TaskDetails from "./TaskDetails";
@@ -134,9 +134,8 @@ export default function TaskRow({ task, expanded, onToggle }: Props): JSX.Elemen
           }}
           className="tabular"
         >
-          <span>{formatCost(liveTask.total_cost_usd)}</span>
           <span style={{ color: "var(--fg-3)", fontSize: 10 }}>
-            · {formatTokens(tokensTotal)}
+            {formatTokens(tokensTotal)}
           </span>
         </span>
       </div>

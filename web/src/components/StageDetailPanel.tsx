@@ -6,7 +6,7 @@ import { Activity, Check, Clock, X } from "lucide-react";
 
 import type { UiEvent, UiStage, UiTask } from "../api";
 import { STAGES } from "../stages";
-import { formatCost, formatDurationMs, formatTokens } from "../utils";
+import { formatDurationMs, formatTokens } from "../utils";
 import AgentBadge from "./AgentBadge";
 import AskAgentComposer from "./AskAgentComposer";
 import EventStream from "./EventStream";
@@ -201,9 +201,6 @@ export default function StageDetailPanel({ task, stageId, events }: Props): JSX.
               <Clock className="ico-sm" />
               {formatDurationMs(stage.duration_ms)}
             </span>
-          )}
-          {stage.cost_usd != null && stage.cost_usd > 0 && (
-            <span>{formatCost(stage.cost_usd)}</span>
           )}
           {tokensTotal > 0 && (
             <span style={{ color: "var(--fg-3)" }}>{formatTokens(tokensTotal)} ток.</span>
