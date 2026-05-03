@@ -25,8 +25,30 @@ function matchesFilter(task: UiTask, filter: TaskFilter): boolean {
   return true;
 }
 
+function matchesSearch(task: UiTask, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (needle.length === 0) return true;
+
+  const issueNumber = String(task.issue_number);
+  const issueHash = `#${issueNumber}`;
+  const haystack = [
+    issueNumber,
+    issueHash,
+    task.issue_title,
+    task.repo,
+    task.status,
+    task.current_stage,
+    task.branch_name,
+    task.worktree_path,
+    task.pr_url,
+  ];
+
+  return haystack.some((value) => value?.toLowerCase().includes(needle));
+}
+
 export default function App(): JSX.Element {
   const [filter, setFilter] = useState<TaskFilter>("all");
+  const [searchQuery, setSearchQuery] = useState("");
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
   const tasksQuery = useQuery({
@@ -61,8 +83,8 @@ export default function App(): JSX.Element {
   }, [tasks]);
 
   const filtered = useMemo(
-    () => tasks.filter((t) => matchesFilter(t, filter)),
-    [tasks, filter],
+    () => tasks.filter((t) => matchesFilter(t, filter) && matchesSearch(t, searchQuery)),
+    [tasks, filter, searchQuery],
   );
 
   const isLoading = tasksQuery.isLoading || reposQuery.isLoading;
@@ -72,7 +94,10 @@ export default function App(): JSX.Element {
     <div className="app-shell" style={{ gridTemplateColumns: "232px 1fr" }}>
       <Sidebar repos={repos} tasks={tasks} />
       <main className="main">
-        <Topbar />
+        <Topbar
+          searchQuery={searchQuery}
+          onSearchQueryChange={setSearchQuery}
+        />
         <FilterBar value={filter} onChange={setFilter} counts={counts} />
         <TableHeader />
 
@@ -106,12 +131,21 @@ export default function App(): JSX.Element {
             <div className="state-icon">
               <Inbox />
             </div>
-            <h3>Нет задач</h3>
-            <p>
-              Навесьте лейбл <span className="mono">agent-task</span> на issue
-              в исходном репозитории и запустите <span className="mono">uv run foundry run</span>,
-              чтобы Foundry подобрал её в обработку.
-            </p>
+            {tasks.length === 0 ? (
+              <>
+                <h3>Нет задач</h3>
+                <p>
+                  Навесьте лейбл <span className="mono">agent-task</span> на issue
+                  в исходном репозитории и запустите <span className="mono">uv run foundry run</span>,
+                  чтобы Foundry подобрал её в обработку.
+                </p>
+              </>
+            ) : (
+              <>
+                <h3>Ничего не найдено</h3>
+                <p>Попробуйте изменить поиск или фильтр статуса.</p>
+              </>
+            )}
           </div>
         )}
 
