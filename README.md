@@ -30,7 +30,7 @@
 | **HTTP API** | [src/api/](src/api/) (FastAPI на `:8000`) | `/api/tasks`, `/api/tasks/{id}`, SSE на `/api/tasks/{id}/events`, `/api/repos`. |
 | **Web UI** | [web/](web/) (Vite + React + TS на `:5173`) | Список задач, раскрывающаяся карточка со stepper'ом и потоком событий агента. |
 
-Подробнее по слоям — [CLAUDE.md](CLAUDE.md) (project map), [docs/architecture/skeleton.md](docs/architecture/skeleton.md) и [DEBUG.md](DEBUG.md) (verified runbook).
+Подробнее по слоям — [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) и [DEBUG.md](DEBUG.md) (verified runbook).
 
 ---
 
@@ -268,7 +268,7 @@ scripts/add-and-process.sh
 ## Тесты
 
 ```bash
-uv run pytest                            # 134 passed (~3s, оффлайн)
+uv run pytest                            # 193 tests, оффлайн
 uv run pytest tests/test_pipeline.py -v
 ```
 
@@ -286,11 +286,8 @@ npm run build                            # tsc -b && vite build
 
 ## Документация
 
-- [CLAUDE.md](CLAUDE.md) — карта проекта для агентов и людей: архитектура, конвенции, правила.
-- [DEBUG.md](DEBUG.md) — verified runbook: как поднимать REPL, мокать пайплайн, инспектить SQLite. Каждая команда здесь была реально выполнена.
-- [docs/architecture/skeleton.md](docs/architecture/skeleton.md) — что сделано в скелете.
-- [docs/architecture/draft.md](docs/architecture/draft.md) — исходный архитектурный набросок.
-- [docs/architecture/agent-protocol.md](docs/architecture/agent-protocol.md) — контракт между orchestrator'ом и coding-агентами.
-- [docs/specs/observability-ui.md](docs/specs/observability-ui.md), [docs/specs/observability-ui-plan.md](docs/specs/observability-ui-plan.md) — спецификация observability/UI слоя.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — каноническая архитектура: workflow, stages, agents, API/UI, безопасность.
+- [DEBUG.md](DEBUG.md) — verified runbook: локальный запуск, быстрые probes, тесты, отладка SQLite/workflows.
+- [docs/specs/observability-ui.md](docs/specs/observability-ui.md) — актуальный контракт observability/API/UI слоя.
 - [IDEAS.md](IDEAS.md) — свалка будущих направлений (как есть, без додумывания).
 - [design_handoff_foundry_observability/](design_handoff_foundry_observability/) — hi-fi дизайн-референс UI.

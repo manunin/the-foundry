@@ -59,7 +59,7 @@ const TASKS = [
         output: { kind: 'files', label: 'Собрано 14 файлов, 3840 строк в контекст', items: [
           'src/api/main.py', 'src/foundry/agents/base.py', 'src/foundry/agents/claude_cli.py',
           'src/foundry/db/tasks.py', 'web/src/components/TaskRow.tsx', 'web/src/app.tsx',
-          'docs/architecture/skeleton.md', '… +7 more'
+          'docs/ARCHITECTURE.md', '… +7 more'
         ]},
       },
       agent_plan: {

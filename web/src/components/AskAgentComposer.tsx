@@ -1,6 +1,6 @@
 // AskAgentComposer — UI-only stub for PR6.
-// The actual POST endpoint is deliberately out of scope (see
-// docs/specs/observability-ui-plan.md, PR6 → "Не делаем: POST /ask").
+// The actual POST endpoint is deliberately out of scope; the current
+// observability contract keeps this as a UI-only affordance.
 
 import type { JSX } from "react";
 import { useState } from "react";

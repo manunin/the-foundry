@@ -90,8 +90,8 @@ uv run foundry run-issue <номер_issue>
 uv run foundry status              # таблица задач из БД
 uv run foundry reset <task_id>     # вернуть задачу в PENDING
 uv run foundry run-issue <number>  # запустить одну задачу вручную
-uv run foundry pr-feedback         # один проход по review/CI в открытых PR
-uv run foundry pr-feedback --once  # то же, синоним
+uv run foundry pr-feedback --once  # один проход по review/CI в открытых PR
+uv run foundry pr-feedback         # continuous polling по открытым PR
 ```
 
 ---
@@ -99,7 +99,7 @@ uv run foundry pr-feedback --once  # то же, синоним
 ## Технический стек
 
 - **Агенты**: stub (оффлайн/тесты), claude_cli (Claude Code CLI), codex_cli (OpenAI Codex CLI), opencode_cli (OpenCode — DeepSeek, OpenAI, OpenRouter и др.)
-- **LLM**: Anthropic Claude (Haiku / Sonnet / Opus), OpenAI GPT-4o (Codex), DeepSeek, OpenRouter (через opencode)
+- **LLM**: Anthropic Claude (Haiku / Sonnet / Opus), OpenAI models через Codex CLI, DeepSeek/OpenRouter/Ollama и другие провайдеры через OpenCode
 - **Трекер задач**: GitHub Issues (via `gh` CLI)
 - **Языки**: Python 3.11+ (backend + pipeline), TypeScript (frontend)
 - **Фреймворки**: FastAPI (HTTP API), Click (CLI), React 19 + Vite (UI), TanStack React Query
@@ -120,7 +120,7 @@ uv run foundry pr-feedback --once  # то же, синоним
 
 **Plan перед реализацией**: да, стадия `PLAN` обязательна. Агент получает контекст репозитория и описание issue, возвращает текстовый план. Результат сохраняется в `stage_results` и передаётся на `IMPLEMENT`.
 
-**Непонятная задача на этапе плана**: если агент не может составить план (например, задача противоречивая или требует уточнений), он завершает ответ маркером `NEED_VERIFICATION`. Workflow блокируется (`TaskStatus.BLOCKED`), в issue публикуется комментарий с вопросами (`stages/issue_comment.py`). Возобновление: `foundry resume <task_id>` после ответа человека в issue. Код: `workflows.py:_block_for_human`, `workflows.py:normalize_planner_outcome`.
+**Непонятная задача на этапе плана**: если агент не может составить план (например, задача противоречивая или требует уточнений), он завершает ответ маркером `NEED_VERIFICATION`. Workflow блокируется (`TaskStatus.BLOCKED`), в issue публикуется комментарий с вопросами (`stages/issue_comment.py`). Возобновление после ответа человека: `POST /api/tasks/{id}/resume` в API/UI или `foundry reset <task_id>` через CLI. Код: `workflows.py:_block_for_human`, `workflows.py:normalize_planner_outcome`.
 
 ---
 
@@ -257,7 +257,7 @@ uv run foundry pr-feedback --once  # то же, синоним
 | SQLite `repo_memory` | долгосрочная память репозитория | то же |
 | git worktree | рабочие файлы задачи в `foundry/task-{id}` ветке | `worktrees/task-{id}/` |
 | checkpoints | pre-implement diff каждой попытки | `data/checkpoints/` |
-| LLM history | история сообщений хранится в claude session, resumable через `--resume {session_id}` | внутри агента |
+| LLM history | session id хранится в SQLite `agent_sessions`; история сообщений остаётся внутри конкретного CLI/провайдера | внутри агента |
 
 Все данные персистентны и переживают рестарт процесса.
 
@@ -282,7 +282,7 @@ uv run foundry pr-feedback --once  # то же, синоним
 **Хорошо поддерживается**:
 - Bugfix и небольшие feature в одном репозитории
 - Проекты с автоматическими тестами (pytest, cargo test, npm test, go test — auto-detection)
-- Python, TypeScript/JavaScript, Rust, Go, Java/Kotlin проекты
+- Python, TypeScript/JavaScript, Rust, Go проекты
 - Задачи с чётким описанием и acceptance criteria в теле issue
 - Проекты с хорошим test coverage (верификатор может опираться на тесты)
 
@@ -301,12 +301,12 @@ uv run foundry pr-feedback --once  # то же, синоним
 
 ### Q12: Непонятная задача
 
-**На стадии PLAN**: если агент не может составить план, он вставляет `NEED_VERIFICATION` в конец ответа. `workflows.py:has_human_input_request` обнаруживает маркер. Workflow вызывает `_block_for_human`:
+**На стадии PLAN**: если агент не может составить план, он вставляет `NEED_VERIFICATION` в конец ответа. `workflows.py:needs_human_input` обнаруживает терминальный маркер. Workflow вызывает `_block_for_human`:
 1. Публикует комментарий в GitHub issue с вопросами агента
 2. Ставит `TaskStatus.BLOCKED`
 3. Задача ждёт — pipeline её пропускает
 
-**Возобновление**: `foundry resume <task_id>` снимает блокировку → задача возвращается в PENDING → запускается заново с учётом ответа человека в issue (следующий CONTEXT прочитает новые комментарии через обновлённое тело issue).
+**Возобновление**: `POST /api/tasks/{id}/resume` снимает блокировку → задача возвращается в PENDING/FETCH → запускается заново. В CLI ближайший эквивалент для отладки — `foundry reset <task_id>`.
 
 **На стадии VERIFY**: если агент-ревьюер вернул непонятный ответ (не `PASS` и не `FAIL: ...`) — `failure_kind=unclear`, `requires_human=True` → BLOCKED с тем же механизмом.
 
@@ -327,6 +327,6 @@ uv run foundry pr-feedback --once  # то же, синоним
 | PR feedback применён | Комментарий в GitHub PR | `workflows.py:pr_feedback` |
 | Нужен ручной запуск | CLI `foundry run-issue <n>` | `cli.py` |
 
-**Снятие блокировки**: `foundry resume <task_id>` — ставит `TaskStatus.PENDING`, задача перезапускается.
+**Снятие блокировки**: `POST /api/tasks/{id}/resume` ставит `TaskStatus.PENDING` и возвращает задачу на `fetch`. Для ручной отладки через CLI используется `foundry reset <task_id>`.
 
 **Опасные команды**: при `SAFE_AGENT_MODE=true` агент работает в ограниченном режиме и не может выполнять shell-команды без permissions-диалога (Claude) или sandbox (Codex). Foundry wrapper перехватывает опасные shell-вызовы через `security.assert_command_allowed` до их исполнения.

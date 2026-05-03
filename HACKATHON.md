@@ -17,7 +17,7 @@
 | **Retry-цикл с накоплением фидбэка** | До `MAX_IMPLEMENT_ATTEMPTS` попыток; каждая следующая получает план + резюме предыдущей попытки + отчёт верификатора. Без этого падающий тест = мёртвая задача. |
 | **Checkpoints перед каждым retry** | `git diff --binary HEAD` → `data/checkpoints/task-{id}-attempt-{n}.diff` до `git reset --hard`. Failed worktree не удаляется. Можно вытащить полезный diff даже из проваленной задачи. |
 | **Repo memory** | После каждой успешной задачи в SQLite пишутся `touched_files`, `verify_commands`, `common_failures`. На следующих задачах CONTEXT их читает и подкладывает в промпт. Эффект — агент быстрее находит «правильные» файлы и тесты. |
-| **NEED_VERIFICATION + BLOCKED + resume** | Если агент не может составить план или ревьюер вернул UNCLEAR — публикуем комментарий с вопросами в issue, ставим BLOCKED, ждём ответа. `foundry resume <id>` возвращает в очередь. Альтернатива — best-effort галлюцинации. |
+| **NEED_VERIFICATION + BLOCKED + resume** | Если агент не может составить план или ревьюер вернул UNCLEAR — публикуем комментарий с вопросами в issue, ставим BLOCKED, ждём ответа. `POST /api/tasks/{id}/resume` или CLI `foundry reset <id>` возвращает задачу в очередь. Альтернатива — best-effort галлюцинации. |
 | **`pr-feedback` workflow** | Отдельный проход по открытым `foundry/task-*` PR: парсит `statusCheckRollup`, `CHANGES_REQUESTED`, последние комментарии → агент дописывает фиксы в ту же ветку. Дедупликация по хешу feedback-блока в repo_memory. |
 | **Pluggable coding agents** | `stub` (offline, детерм.), `claude_cli`, `codex_cli`, `opencode_cli`. Смена бэкенда — одна env-переменная. Per-stage модели (`AGENT_PLAN_MODEL=haiku`, `AGENT_IMPLEMENT_MODEL=sonnet`) — экономим на дешёвых стадиях. |
 | **Safe mode + security layer** | `SAFE_AGENT_MODE=true` по умолчанию (без `--dangerously-skip-permissions`), env scrubbing для subprocess, denylist на `rm -rf` / `git push -f` / `git checkout main` / `git reset --hard` вне worktree, sanity-check (>40 файлов или запрещённые пути → отказ коммита). |
@@ -77,7 +77,7 @@
 - **Prompt injection через тело issue** — частичная защита (изоляция worktree + denylist), но если LLM послушает «выполни X» в issue body — мы не поймаем.
 - **>40 файлов в diff** → sanity-check отказывает в коммите. Для крупных рефакторингов = тупик без ручного вмешательства.
 - **Sandbox escape внутренних shell-вызовов** Claude/Codex в safe mode зависит от их собственных механизмов, а не от Foundry.
-- **Stub vs реальный агент.** Все 134 теста гоняются на stub'е — это не гарантирует, что claude_cli backend работает. Регрессии в реальном бэкенде ловятся только smoke-прогоном.
+- **Stub vs реальный агент.** Оффлайн-тесты гоняются на stub'е и mocked CLI fixtures — это не гарантирует, что живой `claude_cli`/`codex_cli`/`opencode_cli` backend авторизован и работает. Регрессии в реальном бэкенде ловятся smoke-прогоном.
 - **Параллельность.** Не реализована намеренно: «ничего не сломается, потому что нечему».
 
 ---
@@ -88,10 +88,10 @@
 - **Append-only event log + SSE.** UI и pipeline — разные процессы, читающие одну БД. Никаких message queue, никаких WebSocket-комплексностей; SSE с `Last-Event-ID` решает refresh/reconnect бесплатно.
 - **Двухуровневый verify (детерминированный → LLM).** Дешёво и поверочно: 80% фейлов отлавливаются `pytest`/`ruff` без единого LLM-вызова. LLM-ревьюер работает только если есть что ревьюить. Это шаблон, который должен быть в любом code-orchestrator'е.
 - **Git worktree per task.** Бесплатная изоляция, нативная для git, не требует контейнеров. Failed worktree не удаляется — диагностика становится тривиальной.
-- **Pluggable agent backends за тонким интерфейсом** (`coding_agent.py`). Смена `claude_cli` ↔ `codex_cli` ↔ `opencode_cli/deepseek` без правки pipeline-кода. Полезно и для стоимости, и для тестов (offline `stub`).
+- **Pluggable agent backends за тонким интерфейсом** (`src/foundry/agents/`). Смена `claude_cli` ↔ `codex_cli` ↔ `opencode_cli/deepseek` без правки workflow-кода. Полезно и для стоимости, и для тестов (offline `stub`).
 - **Per-stage модели.** `haiku` для plan/verify, `sonnet`/`opus` для implement. Простой паттерн, экономит много денег.
 - **Repo memory как отдельная таблица `(repo, key, value)`.** Тривиально расширяется новыми ключами, читается одним SELECT'ом, отлично работает как «long-term memory» без векторных БД.
-- **`stub` agent как first-class citizen.** Полная offline-симуляция пайплайна, на которой гоняются все 134 теста за ~3s. Без этого тесты были бы либо медленные, либо требовали бы сети — и команда бы их выключила.
+- **`stub` agent как first-class citizen.** Offline-симуляция пайплайна плюс mocked fixtures для реальных CLI-бэкендов; текущий набор — 193 теста без сети. Без этого тесты были бы либо медленные, либо требовали бы внешней авторизации — и команда бы их выключила.
 - **Checkpoint diff'ы перед каждым retry.** Дешёвая страховка (1 строка `git diff --binary > file`), которая не раз спасала полезный код из «неудачной» попытки.
 
 ---
@@ -100,7 +100,7 @@
 
 - **Слишком консервативный `MAX_FILES_PER_PR=40` без override-механизма.** Безопасно, но тупик для рефакторингов. Должен был быть конфигурируемый bypass (например, через `agent-task/large` лейбл).
 - **`SAFE_AGENT_MODE=true` по умолчанию + permission-диалоги Claude.** Безопасно, но ломает часть автономности: агент периодически застревает на тривиальных shell-вызовах. На sandbox-репо `false` был бы продуктивнее по умолчанию.
-- **CLAUDE.md / DEBUG.md / docs/ARCHITECTURE.md как три источника правды.** Они расходятся быстрее, чем код. Нужен один. Прямо сейчас они синхронны, но это благодаря ручному усилию, а не дизайну.
+- **Несколько источников правды для архитектуры.** Старые черновики быстро расходились с кодом. Канонический источник теперь один — `docs/ARCHITECTURE.md`; `DEBUG.md` оставлен как короткий runbook.
 - **Sanity-check на пути (`__pycache__`, `.venv/`).** Полезно, но проще было бы делегировать `.gitignore`-логике git'а, а не поддерживать свой список запрещённых путей.
 - **Polling SQLite в SSE-эндпоинте** для live-событий. Работает, но потребляет CPU на холостом ходу. Должна была быть `LISTEN/NOTIFY`-подобная схема (или хотя бы in-memory pub/sub в API-процессе) с самого начала; сейчас придётся менять.
 - **Поддержка одного `TARGET_REPO` с PR в чужой репо.** Красивая идея на бумаге, но в реальной работе sandbox=target почти всегда. Сложность в коде есть, ценность — нулевая.

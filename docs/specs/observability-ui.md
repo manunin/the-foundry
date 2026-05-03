@@ -1,161 +1,81 @@
-# Observability & Live UI — постановка задачи
+# Observability & Live UI
 
-> Документ для дизайнера. Цель — собрать контекст, проблему и желаемое поведение, чтобы можно было нарисовать макеты будущего «динамического экрана» прогресса задач Foundry. Реализация (бэкенд/фронтенд) — отдельной итерацией; здесь — только что хотим увидеть.
+Актуальный контракт observability-слоя Foundry. Источник архитектурного
+контекста — [../ARCHITECTURE.md](../ARCHITECTURE.md).
 
-## 1. Контекст: что такое The Foundry
+## Что Есть
 
-**The Foundry** — оркестратор «агентских» пайплайнов: берёт GitHub-issue и автоматически прогоняет его через цепочку стадий, в конце выкатывает Pull Request. Подробности — в `CLAUDE.md` и `docs/architecture/skeleton.md`.
+Foundry пишет операционную историю задач в append-only таблицу `task_events`.
+Эта таблица — источник истины для API и UI; `tasks.logs_json` остаётся
+legacy-дневником для совместимости и быстрых отладочных записей.
 
-Одна задача = один GitHub-issue. На каждый issue создаётся отдельный git worktree, и задача проходит линейный FSM:
+Каждая задача может эмитить:
 
-```
-fetch → context → agent_plan → agent_implement → verify → pr → done
-```
+- `stage_started`
+- `stage_finished`
+- `stage_failed`
+- `agent_tool`
+- `agent_thinking`
+- `agent_text`
+- `agent_result`
 
-- `fetch` — забрать issue по лейблу через `gh`
-- `context` — собрать контекст (пока stub)
-- `agent_plan` — coding-agent (например `claude` CLI) пишет план реализации
-- `agent_implement` — coding-agent вносит изменения в файлы
-- `verify` — проверка (пока всегда «ok»)
-- `pr` — `git commit` + `git push` + `gh pr create`
+События имеют монотонный `seq` внутри `task_id`, поэтому SSE может безопасно
+replay'ить хвост после reconnect через `Last-Event-ID`.
 
-Состояние всех задач лежит в SQLite (`data/foundry.sqlite`, таблица `tasks`). Каждая задача знает:
-- `id`, `repo`, `issue_number`, `issue_title`, `issue_body`
-- `status` ∈ `PENDING | RUNNING | DONE | FAILED`
-- `current_stage` — текущая стадия FSM
-- `attempts` — сколько раз пробовали
-- `worktree_path`, `branch_name`, `pr_url`
-- `logs_json` — массив «крошек» от каждой стадии (что вернула, какие ошибки)
-- `created_at`, `updated_at`
+## Backend API
 
-**Уже есть:**
-- CLI: `uv run foundry run | status | reset <id>`
-- Минимальный HTTP API на FastAPI (`src/api/main.py`) — отдаёт список задач из БД
-- Трейсинг через **Langfuse**: каждая задача оборачивается в `@observe(name="task.process")`, каждый LLM-вызов — в `track_generation()` с токенами/стоимостью. Это уже даёт «дашборд», но снаружи — в облаке Langfuse, и не интегрирован в собственный UI.
-- Логи через `structlog` (ConsoleRenderer → stdout): события `run.fetched`, `task.start`, `task.done`, `task.requeued`, `task.failed`.
+FastAPI живёт в `src/api/`.
 
-## 2. Проблема
+| Endpoint | Назначение |
+| --- | --- |
+| `GET /api/tasks` | Список задач с агрегированными стадиями, без полного event stream. |
+| `GET /api/tasks/{id}` | Детали задачи и последние 200 events. |
+| `GET /api/tasks/{id}/events` | SSE stream, replay из SQLite + live events. |
+| `POST /api/tasks/{id}/reset` | Вернуть не-running задачу в `pending/fetch`. |
+| `POST /api/tasks/{id}/resume` | То же, но semantic action для `blocked` задач после human answer. |
+| `GET /api/repos` | Счётчики задач по репозиториям и статусам. |
+| `GET /api/repos/{repo}/memory` | Repo memory (`touched_files`, `verify_commands`, `common_failures`, PR feedback hashes). |
 
-Наблюдаемости снаружи **почти нет**:
+Проекция находится в `src/api/projections.py`. Внутренние стадии остаются
+`plan`/`implement`; для UI они алиасируются в `agent_plan`/`agent_implement`.
 
-1. Пока пайплайн крутится — видно только сухие structlog-строки в stdout. Что **сейчас** делает агент (читает файл, правит код, гоняет тест) — не видно.
-2. После прогона остаётся `logs_json` в SQLite — но это «постфактум», и без UI его никто не открывает.
-3. Нет единого экрана «вот мои задачи, вот что с каждой» — нужно вручную дёргать `foundry status` или открывать Langfuse.
-4. Стоимость и токены сейчас уходят только в Langfuse, в собственном интерфейсе их не видно.
+## Frontend UI
 
-Цитата из `IDEAS.md`:
+React/Vite приложение живёт в `web/`.
 
-> Очень важно иметь отслеживание. Какой-то динамический экран — может быть в браузере, а может быть и как отдельное приложение. В нём можно было бы видеть: что начата такая-то задача, работает сейчас такой-то агент, вот был его вход, вот его выход. Может быть даже раскрывающейся вкладочкой показывать его шаги. В идеале — со стоимостью обработки.
+Текущие ключевые элементы:
 
-## 3. Reference: как это сделано в `myagent`
+- sidebar с репозиториями и counts;
+- topbar и filter bar;
+- таблица задач;
+- status chips;
+- stage stepper;
+- expandable task details;
+- stage input/output panel;
+- live event stream;
+- disabled ask-agent composer как UI-заготовка.
 
-Соседний проект (`/Users/mikhail/w/learning/myagent`) — Telegram-бот, который оборачивает `claude` CLI и в реальном времени стримит **тулзовые вызовы** в чат. Пример того, что видит пользователь:
+UI получает список задач через polling (`GET /api/tasks`) и stream конкретной
+раскрытой задачи через `EventSource`.
 
-```
-⚙ Read: /home/claude/dom/docs/contacts.md
-⚙ Edit: /home/claude/dom/docs/contacts.md
-⚙ Bash: Check git status in dom repo
-⚙ Bash: Recent commits in dom repo
-⚙ Bash: Stage all changed and new files
-⚙ Bash: Commit all changes
-⚙ Bash: Push to remote
-⚙ Bash: Confirm commit to Telegram
-🧠 Thinking: planning the next refactor step…
-```
+## Event Payload Guidelines
 
-Технически это работает так (см. `myagent/src/bot/services/claude_runner.py` и `telegram_ui.py`):
+Короткие поля (`tool`, `detail`, `summary`, `error`, `model`) должны оставаться
+читаемыми verbatim. Длинные поля (`text`, `stdout`, `stderr`, `input`, `output`)
+режутся в `src/foundry/events.py`, чтобы SQLite и UI не захлебнулись большими
+ответами агента.
 
-- `claude` запускается с флагами `--output-format stream-json --verbose`
-- На stdout приходят **JSONL-события** четырёх типов:
-  - `system` — содержит `session_id`
-  - `assistant` — внутри `content[]` блоки `text` / `tool_use` / `thinking`
-  - `result` — финальный текст + `usage` (токены) + `total_cost_usd`
-- Парсер маппит их в события: `TextEvent`, `ToolUseEvent`, `ThinkingEvent`, `ResultEvent`
-- UI-слой раскладывает события в строки `⚙ <ToolName>: <короткая деталь>` и кладёт в сообщение Telegram. Для каждого инструмента есть «короткая деталь», которая важна (`Read` → file_path, `Bash` → description, `Grep` → pattern, и т.д. — см. `_TOOL_DETAIL_KEYS`).
-- В `myagent` существует **четыре стиля рендеринга** одного и того же потока:
-  - `verbose` — каждое событие = отдельное сообщение
-  - `compact` — одно сообщение, поэтапно редактируется
-  - `thread` — сообщение-«журнал» в виде blockquote + отдельное финальное сообщение
-  - `quiet` — только финальный ответ
+Для агентских tool events нормализация делается в
+`src/foundry/agents/streaming.py`: `Read` показывает путь, `Bash` — description
+или command, `Grep` — pattern, неизвестные инструменты показываются безопасно
+без обязательного `detail`.
 
-Эту же машинерию хочется иметь в Foundry: события у нас уже идут (Foundry дёргает тот же `claude --output-format stream-json`), но мы их сейчас собираем в массив и используем только финальный текст. Промежуточные `tool_use` теряются.
+## Открытые Следующие Шаги
 
-См. `src/foundry/agents/claude_cli.py` и `src/foundry/agents/base.py:run_cli_jsonl()` — функция уже читает JSONL, но синхронно и без стриминга наружу.
-
-## 4. Что хотим (горизонты)
-
-Делим на два горизонта, чтобы первый можно было сделать быстро, а второй — спроектировать на вырост.
-
-### Горизонт 1 — «логи стали полезными» (минимум)
-
-Без UI, но уже даёт прозрачность:
-
-- В `structlog` (stdout) на каждую стадию печатать **вход и выход** (заголовок issue, краткий план, список изменённых файлов, ссылку на PR, короткий verify-вердикт).
-- Внутри `agent_plan` / `agent_implement` стримить tool-use события **построчно** в тот же лог: `agent.tool` с полями `tool=Read file=...`, `tool=Bash description=...`, `tool=Edit file=...`. Сейчас события парсятся постфактум — нужно подменить буферизованный `subprocess.run` на стриминг (как `claude_runner.py` в myagent делает через `asyncio.subprocess`).
-- Тот же поток событий складывать в `logs_json` (с timestamp), чтобы потом UI мог их показать.
-
-### Горизонт 2 — Web UI (целевое состояние)
-
-Один экран в браузере, который живёт параллельно с пайплайном.
-
-**Список задач (левая колонка / основная сетка):**
-- Строка на каждую задачу: title, статус, текущая стадия, время старта, длительность, стоимость, ссылка на PR (если есть).
-- Иконка/индикатор «крутится сейчас» с анимацией, пока `status = RUNNING`.
-- Фильтры: по статусу, по репо, по дате.
-- Сортировка: по `updated_at` desc по умолчанию.
-
-**Детали задачи (раскрытие / правая панель):**
-- Шапка: issue (title, body, ссылка на GitHub), repo, branch, worktree, PR.
-- Таймлайн стадий: `fetch | context | plan | implement | verify | pr` — пройденные/текущая/будущие, длительность каждой, стоимость каждой.
-- Под каждой агентской стадией (`plan`, `implement`, иногда `verify`) — раскрывающийся **поток событий агента** (это и есть «как в Telegram»):
-  - `⚙ Read: src/foo.py`
-  - `⚙ Edit: src/foo.py`
-  - `⚙ Bash: run tests`
-  - `🧠 Thinking: …` (опционально, можно скрыть по умолчанию)
-  - `📝 Final: <финальный текст агента>`
-- Для стадии `pr` — diff и команда коммита.
-- Для проваленных — стек ошибки.
-
-**Live-обновления:**
-- Список задач и поток событий должны обновляться без перезагрузки страницы (SSE или WebSocket).
-- Для уже завершённых задач — статичный просмотр из `logs_json`.
-
-**Опционально (nice to have):**
-- Кнопка «отменить» (cancel) для задачи в `RUNNING` — перекликается с открытым вопросом из `IDEAS.md`.
-- Кнопка «retry» для упавшей задачи (по сути `foundry reset <id>`).
-- Сводка по дню/недели: сколько задач сделано, сколько провалено, суммарная стоимость в USD.
-
-## 5. Сущности, которые нужно нарисовать
-
-Минимальный набор макетов, которые имеет смысл нарисовать:
-
-1. **Список задач** (главная страница). Десктоп. Строка задачи в трёх состояниях: `RUNNING`, `DONE`, `FAILED`.
-2. **Детали задачи** — раскрытая. Со всеми стадиями, с раскрытым потоком событий внутри `implement`.
-3. **Поток событий агента** — отдельный фрагмент крупно: как именно показываем `Read`/`Edit`/`Bash`/`Thinking`/`Final`. Иконки, цвета, шрифты, длинные пути (нужно ли обрезать).
-4. **Состояние «пусто»** — нет задач.
-5. **Состояние «ошибка»** — задача упала, как показываем traceback и кнопку retry.
-
-## 6. Технические заметки (для дизайнера контекстом)
-
-- Проект на Python, бэкенд UI почти наверняка будет **FastAPI + SSE** (или WebSocket). Уже есть заглушка `src/api/main.py` с эндпоинтом `/api/tasks`.
-- Источники данных:
-  - `tasks` (SQLite) — статичная картина: список задач, статусы, стадии, `logs_json`.
-  - **Новый** поток событий агента — придётся завести: либо in-memory pub/sub при работе пайплайна, либо отдельную таблицу `task_events` в SQLite.
-  - **Langfuse** — для глубокой аналитики (трейсы, токены, стоимость). UI может ссылаться на Langfuse-трейс, но **не зависеть** от него.
-- Стримминг из `claude` CLI: уже работает через `--output-format stream-json` (см. `myagent/src/bot/services/claude_runner.py:_parse_event` — готовый эталон парсинга).
-- Стиль команды: русскоязычный для прозы и UI-копий, английский для кода и идентификаторов (см. `CLAUDE.md`).
-
-## 7. Открытые вопросы
-
-- Web-приложение или desktop? IDEAS.md допускает оба варианта; по умолчанию исходим из web.
-- Один пользователь или мультиюзер? Сейчас Foundry — личный инструмент, аутентификации нет.
-- Нужно ли показывать `thinking`-блоки по умолчанию, или прятать под «развернуть» (они длинные и шумные)?
-- Хранить полный поток событий **в БД** (надёжно, но раздувает базу) или только в памяти на время работы (дёшево, но нельзя «перемотать» завершённую задачу)?
-- Как поступать с параллельностью? Пока `pipeline.run_once` идёт строго последовательно — UI это упрощает (одна активная задача в момент времени). Дизайн должен учесть, что в будущем задач может крутиться несколько одновременно.
-
-## 8. Не входит в задачу
-
-- Реализация бэкенда стрима событий.
-- Интеграция с Langfuse (она уже есть и живёт отдельно).
-- Парсинг tool-use событий (есть готовый код в `myagent`).
-- Авторизация / права доступа.
+- Показать агрегированную стоимость и токены по задаче/дню/репозиторию.
+- Подключить composer к реальному agent resume/chat flow.
+- Добавить management actions за пределами reset/resume: cancel, retry with
+  reason, manual run.
+- Добавить auth, если UI выйдет за пределы localhost.
+- Уйти от SQLite polling в сторону более явного pub/sub, если live-load станет
+  заметной нагрузкой.
