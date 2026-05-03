@@ -6,6 +6,7 @@ from typing import Any
 
 from .. import observability, state
 from ..events import record_event
+from ..security import scrubbed_agent_env
 from .base import (
     AgentResult,
     AgentStage,
@@ -59,7 +60,11 @@ class CodexCliAgent:
             input=prompt,
         ) as gen:
             events: list[dict[str, Any]] = []
-            for event in iter_cli_jsonl(cmd, cwd=worktree):
+            for event in iter_cli_jsonl(
+                cmd,
+                cwd=worktree,
+                env=scrubbed_agent_env(self.name),
+            ):
                 events.append(event)
                 self._emit_for(task, event)
 
@@ -108,11 +113,12 @@ class CodexCliAgent:
     def _base_flags(self, worktree: Path) -> list[str]:
         flags = [
             "--json",
-            "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
             "-C",
             str(worktree),
         ]
+        if not self._settings.safe_agent_mode:
+            flags.insert(1, "--dangerously-bypass-approvals-and-sandbox")
         if self._settings.model:
             flags += ["-m", self._settings.model]
         return flags

@@ -24,7 +24,7 @@ from typing import Any, Literal
 import structlog
 from langfuse import observe
 
-from . import shell, state, worktree
+from . import security, shell, state, worktree
 from .agents import AgentSettings, AgentStage
 from .agents.base import AgentTask, build_fresh_prompt
 from .config import Settings
@@ -511,6 +511,21 @@ def dev_task(settings: Settings, task: Task) -> Task:
             settings.db_path, task.id, Stage.IMPLEMENT, attempt=attempt
         )
         if saved_impl is None:
+            checkpoint_path = security.checkpoint_diff(
+                worktree_path=wt_path,
+                checkpoint_root=settings.db_path.parent / "checkpoints",
+                task_id=task.id or task.issue_number,
+                attempt=attempt,
+            )
+            state.append_log(
+                settings.db_path,
+                task.id,
+                Stage.IMPLEMENT,
+                {"attempt": attempt, "checkpoint": str(checkpoint_path)},
+            )
+            if attempt > 1:
+                security.reset_task_worktree(wt_path, settings.worktree_root)
+
             task = _mark(settings, task, stage=Stage.IMPLEMENT)
             impl_agent_settings = AgentSettings.from_env(
                 AgentStage.IMPLEMENT, db_path=settings.db_path

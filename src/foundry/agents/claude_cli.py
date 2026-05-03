@@ -5,6 +5,7 @@ from typing import Any
 
 from .. import observability, state
 from ..events import record_event
+from ..security import scrubbed_agent_env
 from .base import (
     AgentResult,
     AgentStage,
@@ -57,10 +58,11 @@ class ClaudeCliAgent:
             "--output-format",
             "stream-json",
             "--verbose",
-            "--dangerously-skip-permissions",
             "--max-turns",
             str(self._settings.max_turns),
         ]
+        if not self._settings.safe_agent_mode:
+            cmd.append("--dangerously-skip-permissions")
         if self._settings.model:
             cmd += ["--model", self._settings.model]
         if resume_id:
@@ -72,7 +74,11 @@ class ClaudeCliAgent:
             input=prompt,
         ) as gen:
             events: list[dict[str, Any]] = []
-            for event in iter_cli_jsonl(cmd, cwd=worktree):
+            for event in iter_cli_jsonl(
+                cmd,
+                cwd=worktree,
+                env=scrubbed_agent_env(self.name),
+            ):
                 events.append(event)
                 self._emit_for(task, event)
 

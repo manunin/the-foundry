@@ -119,6 +119,10 @@ def _dev_task_patches(tmp_path: Path) -> dict[str, dict]:
         "foundry.workflows.pr_stage.run": {
             "return_value": {"pr_url": "https://example/pr/1", "branch": "foundry/task-1"},
         },
+        "foundry.workflows.security.checkpoint_diff": {
+            "return_value": tmp_path / "data" / "checkpoints" / "snap.diff",
+        },
+        "foundry.workflows.security.reset_task_worktree": {},
     }
 
 

@@ -43,6 +43,10 @@ def test_run_once_happy_path(tmp_path: Path) -> None:
              return_value=(tmp_path / "wt", "foundry/task-1"),
          ), \
          patch("foundry.workflows.worktree.cleanup_worktree"), \
+         patch(
+             "foundry.workflows.security.checkpoint_diff",
+             return_value=tmp_path / "data" / "checkpoints" / "snap.diff",
+         ), \
          patch("foundry.workflows.agent_plan_stage.run", return_value={"plan": "", "summary": ""}), \
          patch("foundry.workflows.agent_implement_stage.run", return_value={"applied": []}), \
          patch("foundry.workflows.verify_stage.run", return_value={"passed": True}), \
@@ -82,6 +86,9 @@ def test_fetch_events_are_not_duplicated_on_rerun(tmp_path: Path) -> None:
             "return_value": (tmp_path / "wt", "foundry/task-1"),
         },
         "foundry.workflows.worktree.cleanup_worktree": {},
+        "foundry.workflows.security.checkpoint_diff": {
+            "return_value": tmp_path / "data" / "checkpoints" / "snap.diff",
+        },
         "foundry.workflows.agent_plan_stage.run": {"return_value": {"plan": "", "summary": ""}},
         "foundry.workflows.agent_implement_stage.run": {"return_value": {"applied": []}},
         "foundry.workflows.verify_stage.run": {"return_value": {"passed": True}},
@@ -148,6 +155,10 @@ def test_run_once_stage_failure_marks_failed(tmp_path: Path) -> None:
              return_value=(tmp_path / "wt", "foundry/task-1"),
          ), \
          patch("foundry.workflows.worktree.cleanup_worktree"), \
+         patch(
+             "foundry.workflows.security.checkpoint_diff",
+             return_value=tmp_path / "data" / "checkpoints" / "snap.diff",
+         ), \
          patch("foundry.workflows.agent_plan_stage.run", return_value={"plan": "", "summary": ""}), \
          patch("foundry.workflows.agent_implement_stage.run", side_effect=RuntimeError("boom")):
         processed = pipeline.run_once(settings)

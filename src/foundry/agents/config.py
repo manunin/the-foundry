@@ -6,6 +6,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from ..security import is_safe_agent_mode
 from .base import AgentStage
 
 
@@ -31,6 +32,7 @@ class AgentSettings:
     max_turns: int = 30
     model: str = "haiku"
     db_path: Path | None = None
+    safe_agent_mode: bool = True
 
     @classmethod
     def from_env(cls, stage: AgentStage, db_path: Path | None = None) -> AgentSettings:
@@ -57,4 +59,8 @@ class AgentSettings:
             max_turns=max_turns,
             model=model,
             db_path=db_path,
+            safe_agent_mode=is_safe_agent_mode(
+                os.getenv(f"AGENT_{key}_SAFE_MODE")
+                or os.getenv("SAFE_AGENT_MODE", "true")
+            ),
         )

@@ -22,7 +22,7 @@ def ensure_base_repo(worktree_root: Path, source_repo: str) -> Path:
     else:
         shell.run(["git", "fetch", "origin"], cwd=base)
         shell.run(["git", "checkout", "main"], cwd=base)
-        shell.run(["git", "reset", "--hard", "origin/main"], cwd=base)
+        shell.run(["git", "reset", "--hard", "origin/main"], cwd=base, allow_unsafe=True)
     return base
 
 

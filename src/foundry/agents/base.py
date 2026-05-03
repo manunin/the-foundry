@@ -75,7 +75,13 @@ def build_fresh_prompt(stage: AgentStage, task: AgentTask, input: str) -> str:
     )
 
 
-def run_cli_jsonl(cmd: list[str], *, cwd: Path, timeout_sec: int) -> list[dict]:
+def run_cli_jsonl(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    timeout_sec: int,
+    env: dict[str, str] | None = None,
+) -> list[dict]:
     """Run a CLI that emits newline-delimited JSON events on stdout.
 
     Raises subprocess.CalledProcessError on non-zero exit and TimeoutExpired on
@@ -88,6 +94,7 @@ def run_cli_jsonl(cmd: list[str], *, cwd: Path, timeout_sec: int) -> list[dict]:
         text=True,
         timeout=timeout_sec,
         check=True,
+        env=env,
     )
     events: list[dict] = []
     for line in completed.stdout.splitlines():

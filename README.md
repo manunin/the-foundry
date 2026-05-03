@@ -94,6 +94,18 @@ AGENT_IMPLEMENT_MAX_TURNS=40
 
 Все доступные ключи и оверрайды задокументированы в [.env.example](.env.example) (в т.ч. `codex_cli`, `opencode_cli` и опциональный Langfuse-трейсинг).
 
+### Безопасность и rollback
+
+Foundry изолирует каждую задачу в отдельный git worktree, но это не полноценная security sandbox. Реальные CLI-агенты умеют запускать shell-команды, читать доступные им файлы и пользоваться переданными им credentials. Поэтому дефолт теперь консервативный:
+
+- `SAFE_AGENT_MODE=true` по умолчанию: Claude запускается без `--dangerously-skip-permissions`, Codex — без `--dangerously-bypass-approvals-and-sandbox`;
+- env для agent subprocess scrubbed: передаются только базовые runtime-переменные (`PATH`, `HOME`, `SSH_AUTH_SOCK`, locale и т.п.), backend auth key и явный `AGENT_ENV_ALLOWLIST`;
+- собственные shell-вызовы Foundry проходят denylist для `rm -rf`, `git push --force`, `git checkout main` в task worktree и `git reset --hard` вне task worktree;
+- перед каждой новой implement-попыткой сохраняется `git diff --binary HEAD` в `data/checkpoints/`, а retry делает `git reset --hard HEAD` внутри task worktree перед новой попыткой;
+- failed task worktree не удаляется автоматически: его можно открыть и забрать полезный diff руками.
+
+Текущие ограничения: shell denylist защищает только команды, которые идут через Foundry wrapper. В safe mode безопасность внутренних shell-вызовов Claude/Codex опирается на permission/sandbox-механизмы самих CLI. Если выставить `SAFE_AGENT_MODE=false`, Foundry снова передаст опасные bypass-флаги; делай это только в одноразовом sandbox-репозитории без ценных секретов.
+
 ### Живой пример: pipeline на OpenCode + DeepSeek
 
 Если нет подписки на Claude и не хочется тратить кредиты Anthropic API — есть путь через [OpenCode](https://opencode.ai/) (CLI-агент, умеющий ходить в десятки провайдеров) и DeepSeek (дешёвый API-ключ, регистрация на [platform.deepseek.com](https://platform.deepseek.com/)).

@@ -12,7 +12,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # Prevent .env in the repo root from leaking into tests.
     monkeypatch.setattr("foundry.agents.config.load_dotenv", lambda *a, **kw: False)
     for key in list(os.environ):
-        if key.startswith("AGENT_") or key == "CODING_AGENT":
+        if key.startswith("AGENT_") or key in {"CODING_AGENT", "SAFE_AGENT_MODE"}:
             monkeypatch.delenv(key, raising=False)
 
 
@@ -24,6 +24,7 @@ def test_from_env_returns_defaults_when_nothing_set() -> None:
     assert settings.model == "haiku"
     assert settings.max_turns == 50
     assert settings.timeout_sec == 600
+    assert settings.safe_agent_mode is True
 
 
 def test_from_env_global_coding_agent_overrides_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -72,3 +73,11 @@ def test_from_env_default_max_turns_per_stage_differs() -> None:
 
     assert verify.max_turns == 20
     assert implement.max_turns == 50
+
+
+def test_from_env_parses_safe_agent_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SAFE_AGENT_MODE", "false")
+
+    settings = AgentSettings.from_env(AgentStage.IMPLEMENT)
+
+    assert settings.safe_agent_mode is False

@@ -102,7 +102,20 @@ def test_apply_passes_model_and_max_turns_to_cli(tmp_path: Path) -> None:
     cmd = run.call_args.args[0]
     assert cmd[cmd.index("--model") + 1] == "opus"
     assert cmd[cmd.index("--max-turns") + 1] == "11"
-    assert "--dangerously-skip-permissions" in cmd
+    assert "--dangerously-skip-permissions" not in cmd
+    assert run.call_args.kwargs["env"] is not None
+
+
+def test_apply_can_opt_into_unsafe_claude_flag(tmp_path: Path) -> None:
+    agent = ClaudeCliAgent(settings=_settings(safe_agent_mode=False))
+
+    with patch(
+        "foundry.agents.claude_cli.iter_cli_jsonl",
+        return_value=iter([{"type": "result", "result": "ok"}]),
+    ) as run:
+        agent.apply(task=_task(), worktree=tmp_path, input="")
+
+    assert "--dangerously-skip-permissions" in run.call_args.args[0]
 
 
 def test_apply_runs_in_worktree_cwd(tmp_path: Path) -> None:

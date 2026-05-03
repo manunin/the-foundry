@@ -95,9 +95,24 @@ def test_apply_passes_model_and_worktree_to_cli(tmp_path: Path) -> None:
     cmd = run.call_args.args[0]
     assert cmd[cmd.index("-m") + 1] == "gpt-4o"
     assert cmd[cmd.index("-C") + 1] == str(tmp_path)
-    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
     assert "--skip-git-repo-check" in cmd
     assert run.call_args.kwargs["cwd"] == tmp_path
+    assert run.call_args.kwargs["env"] is not None
+
+
+def test_apply_can_opt_into_unsafe_codex_flag(tmp_path: Path) -> None:
+    agent = CodexCliAgent(settings=_settings(safe_agent_mode=False))
+
+    with patch(
+        "foundry.agents.codex_cli.iter_cli_jsonl",
+        return_value=iter(
+            [{"type": "item.completed", "item": {"type": "agent_message", "text": "ok"}}]
+        ),
+    ) as run:
+        agent.apply(task=_task(), worktree=tmp_path, input="")
+
+    assert "--dangerously-bypass-approvals-and-sandbox" in run.call_args.args[0]
 
 
 def test_extract_usage_from_turn_completed() -> None:

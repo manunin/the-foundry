@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .. import observability, state
+from ..security import scrubbed_agent_env
 from .base import (
     AgentResult,
     AgentStage,
@@ -63,7 +64,12 @@ class OpencodeCliAgent:
             model=self._settings.model or None,
             input=message,
         ) as gen:
-            events = run_cli_jsonl(cmd, cwd=worktree, timeout_sec=self._settings.timeout_sec)
+            events = run_cli_jsonl(
+                cmd,
+                cwd=worktree,
+                timeout_sec=self._settings.timeout_sec,
+                env=scrubbed_agent_env(self.name),
+            )
 
             new_session_id = self._extract_session_id(events)
             if new_session_id:
