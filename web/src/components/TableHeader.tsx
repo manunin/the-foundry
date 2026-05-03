@@ -28,7 +28,7 @@ export default function TableHeader(): JSX.Element {
       <span>Задача</span>
       <span>Стадии</span>
       <span style={{ justifySelf: "end" }}>Длит.</span>
-      <span style={{ justifySelf: "end" }}>Стоимость</span>
+      <span style={{ justifySelf: "end" }}>Токены</span>
     </div>
   );
 }
