@@ -210,6 +210,43 @@ def upsert_task(db_path: Path, task: Task) -> Task:
         return task
 
 
+def reset_task_execution(db_path: Path, task: Task) -> Task:
+    if task.id is None:
+        raise ValueError("cannot reset an unsaved task")
+
+    task.status = TaskStatus.PENDING
+    task.current_stage = Stage.FETCH
+    task.attempts = 0
+    task.worktree_path = None
+    task.branch_name = None
+    task.pr_url = None
+    task.updated_at = _now_iso()
+
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE tasks SET
+                status = ?, current_stage = ?, attempts = ?,
+                worktree_path = ?, branch_name = ?, pr_url = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                task.status.value,
+                task.current_stage.value,
+                task.attempts,
+                task.worktree_path,
+                task.branch_name,
+                task.pr_url,
+                task.updated_at,
+                task.id,
+            ),
+        )
+        conn.execute("DELETE FROM stage_results WHERE task_id = ?", (task.id,))
+        conn.execute("DELETE FROM agent_sessions WHERE task_id = ?", (task.id,))
+    return task
+
+
 def append_log(db_path: Path, task_id: int, stage: Stage, entry: dict) -> None:
     with _connect(db_path) as conn:
         row = conn.execute(

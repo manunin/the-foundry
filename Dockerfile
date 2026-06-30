@@ -2,7 +2,7 @@
 
 FROM node:24-bookworm-slim AS node_runtime
 
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm
+FROM docker.io/astral/uv:python3.12-bookworm
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/src \

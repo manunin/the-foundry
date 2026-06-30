@@ -144,17 +144,31 @@ def _detect_verify_commands(worktree_path: Path) -> list[list[str]]:
         cmds.append(["uv", "run", "ruff", "check", "."])
         if (worktree_path / "tests").is_dir():
             cmds.append(["uv", "run", "pytest", "-x", "--no-header", "-q"])
+
+    package_dirs: list[Path] = []
     if (worktree_path / "package.json").exists():
-        cmds.extend(_npm_commands(worktree_path, Path(".")))
+        package_dirs.append(Path("."))
     for package_json in sorted(worktree_path.glob("*/package.json")):
-        package_dir = package_json.parent.relative_to(worktree_path)
-        cmds.extend(_npm_commands(worktree_path, package_dir))
+        package_dirs.append(package_json.parent.relative_to(worktree_path))
+
+    npm_install_commands: list[list[str]] = []
+    npm_check_commands: list[list[str]] = []
+    for package_dir in package_dirs:
+        install_commands, check_commands = _npm_commands(worktree_path, package_dir)
+        npm_install_commands.extend(install_commands)
+        npm_check_commands.extend(check_commands)
+    cmds.extend(npm_install_commands)
+    cmds.extend(npm_check_commands)
+
     if (worktree_path / "Cargo.toml").exists():
         cmds.append(["cargo", "test"])
     return _dedupe_commands(cmds)
 
 
-def _npm_commands(root: Path, package_dir: Path) -> list[list[str]]:
+def _npm_commands(
+    root: Path,
+    package_dir: Path,
+) -> tuple[list[list[str]], list[list[str]]]:
     package_root = root / package_dir
     package_json = _read_package_json(package_root / "package.json")
     scripts = package_json.get("scripts", {})
@@ -162,14 +176,16 @@ def _npm_commands(root: Path, package_dir: Path) -> list[list[str]]:
         scripts = {}
 
     prefix = [] if package_dir.as_posix() == "." else ["--prefix", package_dir.as_posix()]
-    cmds: list[list[str]] = []
+    install_commands: list[list[str]] = []
     if (package_root / "package-lock.json").exists():
-        cmds.append(["npm", *prefix, "ci"])
+        install_commands.append(["npm", *prefix, "ci"])
+
+    check_commands: list[list[str]] = []
     for script in ("build", "lint", "test"):
         if script in scripts:
             suffix = ["--silent"] if script == "test" else []
-            cmds.append(["npm", *prefix, "run", script, *suffix])
-    return cmds
+            check_commands.append(["npm", *prefix, "run", script, *suffix])
+    return install_commands, check_commands
 
 
 def _read_package_json(path: Path) -> dict[str, object]:

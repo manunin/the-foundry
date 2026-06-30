@@ -8,7 +8,6 @@ import structlog
 
 from . import pipeline, state, workflows
 from .config import ConfigError, load_settings
-from .models import Stage, TaskStatus
 
 
 def _configure_logging() -> None:
@@ -175,10 +174,7 @@ def reset(task_id: int) -> None:
         click.echo(f"no task with id {task_id}", err=True)
         sys.exit(1)
 
-    task.status = TaskStatus.PENDING
-    task.current_stage = Stage.FETCH
-    task.pr_url = None
-    state.upsert_task(settings.db_path, task)
+    state.reset_task_execution(settings.db_path, task)
     click.echo(f"task {task_id} reset to pending")
 
 

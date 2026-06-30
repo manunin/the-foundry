@@ -63,16 +63,16 @@ async def get_task(task_id: int) -> UiTask:
 @app.post("/api/tasks/{task_id}/reset", response_model=UiTask)
 async def reset_task(task_id: int) -> UiTask:
     """Reset a task to pending/fetch so the worker can retry it."""
-    return _reset_task(task_id)
+    return _set_task_pending(task_id, clear_execution=True)
 
 
 @app.post("/api/tasks/{task_id}/resume", response_model=UiTask)
 async def resume_task(task_id: int) -> UiTask:
     """Resume a human-blocked task after someone answered in the issue."""
-    return _reset_task(task_id)
+    return _set_task_pending(task_id, clear_execution=False)
 
 
-def _reset_task(task_id: int) -> UiTask:
+def _set_task_pending(task_id: int, *, clear_execution: bool) -> UiTask:
     settings = _settings_or_raise()
     state.init_db(settings.db_path)
 
@@ -82,10 +82,13 @@ def _reset_task(task_id: int) -> UiTask:
     if task.status == TaskStatus.RUNNING:
         raise HTTPException(status_code=409, detail="Running tasks cannot be reset")
 
-    task.status = TaskStatus.PENDING
-    task.current_stage = Stage.FETCH
-    task.pr_url = None
-    task = state.upsert_task(settings.db_path, task)
+    if clear_execution:
+        task = state.reset_task_execution(settings.db_path, task)
+    else:
+        task.status = TaskStatus.PENDING
+        task.current_stage = Stage.FETCH
+        task.pr_url = None
+        task = state.upsert_task(settings.db_path, task)
 
     events = read_events(settings.db_path, task_id)
     memory = state.list_repo_memory(settings.db_path, task.repo)

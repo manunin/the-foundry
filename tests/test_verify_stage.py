@@ -132,6 +132,30 @@ def test_detect_nested_package_json_installs_and_runs_scripts(tmp_path: Path) ->
     ]
 
 
+def test_detect_installs_all_npm_packages_before_running_scripts(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"build":"npm -C web run build"}}')
+    (tmp_path / "package-lock.json").write_text("{}")
+    api = tmp_path / "api"
+    api.mkdir()
+    (api / "package.json").write_text('{"scripts":{"test":"vitest"}}')
+    (api / "package-lock.json").write_text("{}")
+    web = tmp_path / "web"
+    web.mkdir()
+    (web / "package.json").write_text('{"scripts":{"build":"vue-tsc && vite build"}}')
+    (web / "package-lock.json").write_text("{}")
+
+    assert verify_stage._detect_verify_commands(tmp_path) == [
+        ["npm", "ci"],
+        ["npm", "--prefix", "api", "ci"],
+        ["npm", "--prefix", "web", "ci"],
+        ["npm", "run", "build"],
+        ["npm", "--prefix", "api", "run", "test", "--silent"],
+        ["npm", "--prefix", "web", "run", "build"],
+    ]
+
+
 # ----- _parse_verdict -----------------------------------------------------
 
 

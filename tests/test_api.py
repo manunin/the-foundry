@@ -134,9 +134,16 @@ def test_reset_task_sets_pending_fetch(client: TestClient, _setup_env: Path) -> 
             issue_body="Body",
             status=TaskStatus.FAILED,
             current_stage=Stage.FAILED,
+            attempts=2,
+            worktree_path="/tmp/worktree",
+            branch_name="foundry/task-1",
             pr_url="https://example.test/pr/1",
         ),
     )
+    state.save_stage_result(
+        db, task.id, Stage.VERIFY, {"passed": False}, attempt=2
+    )
+    state.save_agent_session(db, task.id, "implement", "codex_cli", "session-1")
 
     # Act
     response = client.post(f"/api/tasks/{task.id}/reset")
@@ -147,6 +154,13 @@ def test_reset_task_sets_pending_fetch(client: TestClient, _setup_env: Path) -> 
     assert payload["status"] == "pending"
     assert payload["current_stage"] == "fetch"
     assert payload["pr_url"] is None
+    reset_task = state.get_task(db, task.id)
+    assert reset_task is not None
+    assert reset_task.attempts == 0
+    assert reset_task.worktree_path is None
+    assert reset_task.branch_name is None
+    assert state.get_stage_result(db, task.id, Stage.VERIFY, attempt=2) is None
+    assert state.get_agent_session(db, task.id, "implement", "codex_cli") is None
 
 
 def test_reset_task_rejects_running(client: TestClient, _setup_env: Path) -> None:
@@ -185,6 +199,7 @@ def test_resume_task_sets_pending_fetch(client: TestClient, _setup_env: Path) ->
             current_stage=Stage.PLAN,
         ),
     )
+    state.save_stage_result(db, task.id, Stage.PLAN, {"plan": "continue"})
 
     # Act
     response = client.post(f"/api/tasks/{task.id}/resume")
@@ -194,6 +209,7 @@ def test_resume_task_sets_pending_fetch(client: TestClient, _setup_env: Path) ->
     payload = response.json()
     assert payload["status"] == "pending"
     assert payload["current_stage"] == "fetch"
+    assert state.get_stage_result(db, task.id, Stage.PLAN) == {"plan": "continue"}
 
 
 def test_get_repos_counts(client: TestClient, _setup_env: Path) -> None:
