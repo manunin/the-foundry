@@ -4,11 +4,12 @@ import traceback
 
 import structlog
 
-from . import observability, state
-from .config import Settings
-from .models import Stage, Task, TaskStatus
-from .stages import fetch as fetch_stage
-from .workflows import dev_task
+from foundry import observability, state
+from foundry.config import Settings
+from foundry.forges import ForgeProvider, provider_for
+from foundry.models import Stage, Task, TaskStatus
+from foundry.stages import fetch as fetch_stage
+from foundry.workflows import dev_task
 
 log = structlog.get_logger()
 
@@ -18,11 +19,14 @@ log = structlog.get_logger()
 PRE_IMPLEMENT_STAGES = {Stage.FETCH, Stage.CONTEXT, Stage.PLAN}
 
 
-def _process_tasks(settings: Settings, tasks: list[Task]) -> list[Task]:
+def _process_tasks(
+    settings: Settings, tasks: list[Task], provider: ForgeProvider | None = None
+) -> list[Task]:
+    active_provider = provider or provider_for(settings)
     processed: list[Task] = []
     for task in tasks:
         try:
-            processed.append(dev_task(settings, task))
+            processed.append(dev_task(settings, task, active_provider))
         except Exception as e:
             failed_stage = task.current_stage
             tb = traceback.format_exc()
@@ -63,10 +67,11 @@ def run_once(settings: Settings) -> list[Task]:
     """
     observability.init_langfuse()
     state.init_db(settings.db_path)
-    tasks = fetch_stage.fetch(settings)
+    provider = provider_for(settings)
+    tasks = fetch_stage.fetch(settings, provider)
     log.info("run.fetched", count=len(tasks))
 
-    processed = _process_tasks(settings, tasks)
+    processed = _process_tasks(settings, tasks, provider)
     observability.flush()
     return processed
 
@@ -75,8 +80,9 @@ def run_issue(settings: Settings, issue_number: int) -> Task:
     """Run one issue immediately, without changing the polling query."""
     observability.init_langfuse()
     state.init_db(settings.db_path)
-    task = fetch_stage.fetch_issue(settings, issue_number)
+    provider = provider_for(settings)
+    task = fetch_stage.fetch_issue(settings, issue_number, provider)
     log.info("run_issue.fetched", issue_number=issue_number, task_id=task.id)
-    processed = _process_tasks(settings, [task])
+    processed = _process_tasks(settings, [task], provider)
     observability.flush()
     return processed[0]

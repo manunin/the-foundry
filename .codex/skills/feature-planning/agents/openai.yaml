@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feature Planning"
+  short_description: "Plan Foundry features from current code"
+  default_prompt: "Use $feature-planning to inspect The Foundry and save a repository-specific implementation plan under .codex/plans."

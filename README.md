@@ -6,6 +6,25 @@
 
 > **TL;DR.** Поставь зависимости (`uv sync`, `cd web && npm install`), скопируй `.env.example` → `.env`, заполни `SOURCE_REPO`/`TARGET_REPO`, и запускай три процесса в трёх терминалах: **listener** (`uv run foundry run`), **API** (`uv run uvicorn api.main:app --reload`), **UI** (`cd web && npm run dev`). Или одной командой в Docker: `docker compose up --build`. По умолчанию listener гоняет stub-агента (оффлайн); чтобы получить реальный код от LLM, поставь `claude` CLI и переключи `CODING_AGENT=claude_cli`.
 
+## GitHub и GitLab
+
+`FORGE_PROVIDER=github` используется по умолчанию. Для GitLab.com или
+self-managed GitLab задайте `FORGE_PROVIDER=gitlab`, `GITLAB_HOST` и
+`GITLAB_TOKEN` либо выполните `glab auth login`. GitLab-токен должен иметь
+доступ к API и запись в `TARGET_REPO`; для private projects обычно нужен scope
+`api` и роль Developer или выше.
+Для HTTP-only инсталляции укажите схему явно:
+`GITLAB_HOST=http://gitlab.example.internal`.
+Clone/push использует HTTPS по умолчанию (`GITLAB_GIT_PROTOCOL=https`);
+SSH можно выбрать явно при наличии keys и совместимых host algorithms.
+
+Одна база SQLite обслуживает только один forge и hostname. `SOURCE_REPO`
+содержит issues, а `TARGET_REPO` клонируется, получает push и MR/PR; оба проекта
+должны находиться на одном forge. GitLab namespaces с вложенными группами
+поддерживаются. Feedback для MR включает unresolved resolvable discussions и
+failed/canceled pipeline текущего head SHA. При SSH clone/push контейнеру также
+нужно смонтировать SSH keys и known_hosts.
+
 ---
 
 ## Содержание

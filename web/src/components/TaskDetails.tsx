@@ -65,7 +65,6 @@ export default function TaskDetails({
   const activeStage = userPicked ? selectedStage : defaultStage;
 
   const stageEvents = events.filter((e) => e.stage === activeStage);
-  const issueUrl = `https://github.com/${task.repo}/issues/${task.issue_number}`;
   const queryClient = useQueryClient();
   const resetMutation = useMutation({
     mutationFn: () => resetTask(task.id),
@@ -162,7 +161,7 @@ export default function TaskDetails({
               </span>
             )}
             <a
-              href={issueUrl}
+              href={task.issue_url}
               target="_blank"
               rel="noreferrer noopener"
               onClick={(e) => e.stopPropagation()}
@@ -191,7 +190,7 @@ export default function TaskDetails({
                   color: "var(--accent)",
                 }}
               >
-                PR
+                {task.change_kind}
                 <ExternalLink className="ico-sm" style={{ opacity: 0.6 }} />
               </a>
             )}

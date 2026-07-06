@@ -92,7 +92,23 @@ def run(
             "stdout": det_summary,
         }
 
-    diff_text = _capture_diff(worktree_path, settings.verify_diff_max_bytes)
+    try:
+        diff_text = _capture_diff(
+            worktree_path,
+            settings.verify_diff_max_bytes,
+            settings.verify_command_timeout_sec,
+        )
+    except (subprocess.TimeoutExpired, shell.ShellError) as error:
+        return _infra_result(
+            "git diff",
+            (
+                f"timeout after {settings.verify_command_timeout_sec}s"
+                if isinstance(error, subprocess.TimeoutExpired)
+                else str(error)
+            ),
+            retryable=True,
+            requires_human=False,
+        )
     try:
         agent_res = agent_verify_stage.run(task, worktree_path, diff_text, settings)
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError, RuntimeError) as e:
@@ -208,7 +224,7 @@ def _dedupe_commands(cmds: list[list[str]]) -> list[list[str]]:
     return out
 
 
-def _capture_diff(worktree_path: Path, max_bytes: int) -> str:
+def _capture_diff(worktree_path: Path, max_bytes: int, timeout_sec: int) -> str:
     """Snapshot all working-tree changes (including untracked) as unified diff.
 
     `git add -N .` registers untracked files as intent-to-add so they appear
@@ -216,21 +232,47 @@ def _capture_diff(worktree_path: Path, max_bytes: int) -> str:
     is unaffected. Truncates to `--stat` summary if the raw diff exceeds the
     byte cap; partial diffs are misleading to the reviewer.
     """
-    shell.run(["git", "add", "-N", "."], cwd=worktree_path, check=False, timeout=30)
+    intent_to_add = shell.run(
+        ["git", "add", "-N", "."],
+        cwd=worktree_path,
+        check=False,
+        timeout=timeout_sec,
+    )
+    if not intent_to_add.ok:
+        raise shell.ShellError(
+            ["git", "add", "-N", "."],
+            intent_to_add.returncode,
+            intent_to_add.stdout,
+            intent_to_add.stderr,
+        )
     res = shell.run(
         ["git", "diff", "--no-color"],
         cwd=worktree_path,
         check=False,
-        timeout=30,
+        timeout=timeout_sec,
     )
+    if not res.ok:
+        raise shell.ShellError(
+            ["git", "diff", "--no-color"],
+            res.returncode,
+            res.stdout,
+            res.stderr,
+        )
     diff = res.stdout
     if len(diff.encode("utf-8")) > max_bytes:
         stat = shell.run(
             ["git", "diff", "--stat"],
             cwd=worktree_path,
             check=False,
-            timeout=30,
+            timeout=timeout_sec,
         )
+        if not stat.ok:
+            raise shell.ShellError(
+                ["git", "diff", "--stat"],
+                stat.returncode,
+                stat.stdout,
+                stat.stderr,
+            )
         diff = (
             stat.stdout
             + f"\n--- diff truncated, full body exceeded {max_bytes} bytes ---\n"
@@ -263,11 +305,16 @@ def _format_summary(outputs: list[dict]) -> str:
 
 def _deterministic_failure(outputs: list[dict]) -> dict:
     last = outputs[-1]
-    tail = (last["stderr"] or last["stdout"] or "").strip()
+    output_parts = [
+        text.strip()
+        for text in (last["stdout"], last["stderr"])
+        if text and text.strip()
+    ]
+    tail = "\n\n".join(output_parts)
     report_lines = [f"`{last['cmd']}` failed (rc={last['rc']})"]
     if tail:
         report_lines.append("")
-        report_lines.append(tail[-2000:])
+        report_lines.append(tail[-4000:])
     return {
         "passed": False,
         "retryable": True,

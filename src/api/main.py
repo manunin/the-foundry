@@ -155,7 +155,7 @@ async def get_repos() -> list[dict]:
 
 @app.post("/api/fetch")
 async def trigger_fetch() -> dict:
-    """Pull open issues from GitHub and upsert new tasks into the DB."""
+    """Pull open issues from the configured forge and upsert new tasks."""
     from foundry.stages.fetch import fetch
 
     settings = _settings_or_raise()

@@ -65,6 +65,10 @@ export interface UiTask {
   repo: string;
   issue_number: number;
   issue_title: string;
+  forge: "github" | "gitlab";
+  forge_host: string;
+  issue_url: string;
+  change_kind: "PR" | "MR";
   status: string;
   current_stage: string;
   attempts: number;

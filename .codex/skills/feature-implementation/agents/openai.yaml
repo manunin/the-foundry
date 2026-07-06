@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feature Implementation"
+  short_description: "Implement and verify Foundry features"
+  default_prompt: "Use $feature-implementation to implement the specified Foundry feature, add tests, and run the applicable checks."

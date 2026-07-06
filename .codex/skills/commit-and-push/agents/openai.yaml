@@ -1,0 +1,4 @@
+interface:
+  display_name: "Commit and Push Handoff"
+  short_description: "Prepare changes for Foundry orchestration"
+  default_prompt: "Use $commit-and-push to validate my task-worktree changes and prepare an orchestrator handoff without committing or pushing."

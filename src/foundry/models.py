@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class Stage(str, Enum):
+class ForgeKind(StrEnum):
+    GITHUB = "github"
+    GITLAB = "gitlab"
+
+
+class Stage(StrEnum):
     FETCH = "fetch"
     CONTEXT = "context"
     PLAN = "plan"
@@ -18,7 +23,7 @@ class Stage(str, Enum):
     FAILED = "failed"
 
 
-class TaskStatus(str, Enum):
+class TaskStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     BLOCKED = "blocked"
@@ -46,6 +51,9 @@ class Task:
     logs_json: str = "[]"
     created_at: str = field(default_factory=_now_iso)
     updated_at: str = field(default_factory=_now_iso)
+    forge: ForgeKind = ForgeKind.GITHUB
+    forge_host: str = "github.com"
+    issue_url: str | None = None
 
 
 @dataclass

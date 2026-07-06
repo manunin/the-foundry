@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
+from foundry.models import ForgeKind
 
 
 class ConfigError(RuntimeError):
@@ -30,6 +31,8 @@ class Settings:
     verify_commands: tuple[tuple[str, ...], ...] | None = None
     verify_command_timeout_sec: int = 300
     verify_diff_max_bytes: int = 200_000
+    forge: ForgeKind = ForgeKind.GITHUB
+    forge_host: str = "github.com"
 
 
 def _parse_csv(raw: str) -> tuple[str, ...]:
@@ -76,7 +79,24 @@ def load_settings(env_path: Path | None = None) -> Settings:
     if not source_repo or not target_repo:
         raise ConfigError("SOURCE_REPO and TARGET_REPO must be set (owner/name)")
 
-    token = os.environ.get("GITHUB_TOKEN", "").strip() or None
+    provider_raw = os.environ.get("FORGE_PROVIDER", "github").strip().lower()
+    try:
+        forge = ForgeKind(provider_raw)
+    except ValueError as exc:
+        raise ConfigError("FORGE_PROVIDER must be 'github' or 'gitlab'") from exc
+    if forge is ForgeKind.GITHUB:
+        raw_host = os.environ.get("GH_HOST", "github.com")
+    else:
+        raw_host = os.environ.get("GITLAB_HOST") or os.environ.get(
+            "GL_HOST", "gitlab.com"
+        )
+    forge_host = _normalize_host(raw_host)
+    token = (
+        os.environ.get("GH_TOKEN")
+        or os.environ.get("GITHUB_TOKEN")
+        or os.environ.get("GITLAB_TOKEN")
+        or ""
+    ).strip() or None
     issue_label = os.environ.get("ISSUE_LABEL", "agent-task").strip()
     issue_labels = _parse_csv(os.environ.get("ISSUE_LABELS", issue_label))
     issue_assignee = os.environ.get("ISSUE_ASSIGNEE", "").strip() or None
@@ -101,4 +121,17 @@ def load_settings(env_path: Path | None = None) -> Settings:
             os.environ.get("VERIFY_COMMAND_TIMEOUT_SEC", "300")
         ),
         verify_diff_max_bytes=int(os.environ.get("VERIFY_DIFF_MAX_BYTES", "200000")),
+        forge=forge,
+        forge_host=forge_host,
     )
+
+
+def _normalize_host(raw: str) -> str:
+    host = raw.strip().rstrip("/")
+    if host.lower().startswith("https://"):
+        host = host[8:]
+    elif host.lower().startswith("http://"):
+        host = host[7:]
+    if not host or "/" in host:
+        raise ConfigError("forge host must be a hostname without a path")
+    return host

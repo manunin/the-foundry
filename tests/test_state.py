@@ -164,3 +164,73 @@ def test_agent_sessions_round_trip(tmp_path: Path) -> None:
     assert (
         state.get_agent_session(db, task.id, "implement", "claude_cli") == "sess-2"
     )
+
+
+def test_init_migrates_legacy_tasks_idempotently(tmp_path: Path) -> None:
+    db = tmp_path / "legacy.sqlite"
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo TEXT NOT NULL, issue_number INTEGER NOT NULL,
+                issue_title TEXT NOT NULL, issue_body TEXT NOT NULL,
+                status TEXT NOT NULL, current_stage TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0, worktree_path TEXT,
+                branch_name TEXT, pr_url TEXT, logs_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE (repo, issue_number)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO tasks (
+                repo, issue_number, issue_title, issue_body, status,
+                current_stage, created_at, updated_at
+            ) VALUES ('owner/repo', 7, 'legacy', '', 'done', 'done', 'now', 'now')
+            """
+        )
+
+    state.init_db(db)
+    state.init_db(db)
+
+    task = state.get_task(db, 1)
+    assert task is not None
+    assert task.issue_title == "legacy"
+    assert task.forge.value == "github"
+    assert task.forge_host == "github.com"
+    assert task.issue_url is None
+
+
+def test_resume_with_clarification_preserves_upstream_stage(tmp_path: Path) -> None:
+    db = tmp_path / "foundry.sqlite"
+    state.init_db(db)
+    task = state.upsert_task(
+        db,
+        Task(
+            repo="owner/repo",
+            issue_number=9,
+            issue_title="Clarify",
+            issue_body="Original",
+            status=TaskStatus.BLOCKED,
+            current_stage=Stage.PLAN,
+            worktree_path="/worktrees/task-1",
+            branch_name="foundry/task-1",
+        ),
+    )
+    state.save_stage_result(db, task.id, Stage.CONTEXT, {"context": "cached"})
+    state.save_stage_result(db, task.id, Stage.PLAN, {"plan": "draft"})
+    state.save_stage_result(db, task.id, Stage.IMPLEMENT, {"result": "stale"})
+    task.issue_body = "Original\n\nClarification"
+
+    resumed = state.resume_task_with_clarification(db, task)
+
+    assert resumed.status == TaskStatus.PENDING
+    assert resumed.current_stage == Stage.PLAN
+    assert resumed.worktree_path == "/worktrees/task-1"
+    assert state.get_stage_result(db, task.id, Stage.CONTEXT) == {
+        "context": "cached"
+    }
+    assert state.get_stage_result(db, task.id, Stage.PLAN) is None
+    assert state.get_stage_result(db, task.id, Stage.IMPLEMENT) is None

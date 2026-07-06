@@ -15,11 +15,8 @@ refuses to run agent-defined branches.
 """
 from __future__ import annotations
 
-import hashlib
-import json
-import time
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -31,6 +28,12 @@ from .agents import AgentSettings, AgentStage
 from .agents.base import AgentTask, build_fresh_prompt
 from .config import Settings
 from .events import read_events, record_event, stage_span
+from foundry.forges import (
+    ChangeFeedback,
+    ForgeChange,
+    ForgeProvider,
+    provider_for,
+)
 from .models import Stage, Task, TaskStatus
 from .stages import agent_implement as agent_implement_stage
 from .stages import agent_plan as agent_plan_stage
@@ -42,7 +45,7 @@ from .stages import verify as verify_stage
 log = structlog.get_logger()
 
 
-class WorkflowName(str, Enum):
+class WorkflowName(StrEnum):
     DEV_TASK = "dev_task"
     PR_VERIFY = "pr_verify"
     PR_FEEDBACK = "pr_feedback"
@@ -204,159 +207,51 @@ def _build_attempt_input(
     return "".join(parts)
 
 
-def _build_pr_feedback_input(pr: dict[str, Any], feedback: str) -> str:
+def _build_pr_feedback_input(change: ForgeChange, feedback: str) -> str:
     return "\n".join(
         [
-            "Address the latest PR feedback on the existing branch.",
+            "Address the latest change-request feedback on the existing branch.",
             "",
-            f"PR: #{pr.get('number')} {pr.get('title', '')}".strip(),
-            f"Branch: `{pr.get('headRefName', '')}`",
-            f"URL: {pr.get('url', '')}",
+            f"Change request: #{change.number} {change.title}".strip(),
+            f"Branch: `{change.branch}`",
+            f"URL: {change.url}",
             "",
             "## Feedback",
             feedback.strip(),
             "",
             "Make the minimal code changes needed to satisfy this feedback. "
-            "Do not open a new PR, switch branches, commit, or push.",
+            "Do not open a new change request, switch branches, commit, or push.",
         ]
     )
 
 
-def _has_failing_check(check: dict[str, Any]) -> bool:
-    conclusion = str(check.get("conclusion") or "").upper()
-    status = str(check.get("status") or check.get("state") or "").upper()
-    if conclusion in {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}:
-        return True
-    return status in {"FAILURE", "ERROR", "FAILED"}
-
-
-def _format_pr_feedback(pr: dict[str, Any]) -> str:
-    parts: list[str] = []
-
-    requested = []
-    for review in pr.get("reviews", []):
-        if str(review.get("state", "")).upper() == "CHANGES_REQUESTED":
-            requested.append(review)
-    if requested:
-        lines = ["### Requested changes"]
-        for review in requested:
-            author = (review.get("author") or {}).get("login") or "unknown"
-            body = (review.get("body") or "").strip()
-            lines.append(f"- {author}: {body or 'requested changes'}")
-        parts.append("\n".join(lines))
-
-    failing = []
-    for check in pr.get("statusCheckRollup", []):
-        if isinstance(check, dict) and _has_failing_check(check):
-            failing.append(check)
-    if failing:
-        lines = ["### Failing CI"]
-        for check in failing:
-            name = (
-                check.get("name")
-                or check.get("context")
-                or check.get("workflowName")
-                or "check"
-            )
-            state = (
-                check.get("conclusion")
-                or check.get("status")
-                or check.get("state")
-                or "failed"
-            )
-            lines.append(f"- {name}: {state}")
-        parts.append("\n".join(lines))
-
-    comments = [
-        c.get("body", "").strip()
-        for c in pr.get("comments", [])
-        if isinstance(c, dict) and c.get("body", "").strip()
-    ]
-    if comments and (requested or failing):
-        parts.append("### PR comments\n" + "\n\n".join(comments[-5:]))
-
-    return "\n\n".join(parts).strip()
-
-
-def _gh_run_with_retry(cmd: list[str], retries: int = 3, backoff: float = 10.0) -> shell.Result:
-    """Run a gh command, retrying on network errors (i/o timeout, connection reset)."""
-    _log = structlog.get_logger()
-    last_exc: Exception | None = None
-    for attempt in range(retries):
-        try:
-            return shell.run(cmd)
-        except shell.ShellError as exc:
-            network_error = "timeout" in exc.stderr.lower() or "connection" in exc.stderr.lower()
-            if not network_error or attempt == retries - 1:
-                raise
-            last_exc = exc
-            _log.warning("gh.network_retry", attempt=attempt + 1, stderr=exc.stderr[:120])
-            time.sleep(backoff * (attempt + 1))
-    raise last_exc  # type: ignore[misc]
-
-
-def _list_open_foundry_prs(settings: Settings) -> list[dict[str, Any]]:
-    result = _gh_run_with_retry(
-        [
-            "gh",
-            "pr",
-            "list",
-            "--repo",
-            settings.target_repo,
-            "--state",
-            "open",
-            "--json",
-            "number,title,headRefName,url",
-            "--limit",
-            "100",
-        ]
-    )
-    prs = json.loads(result.stdout or "[]")
-    return [
-        pr
-        for pr in prs
-        if str(pr.get("headRefName") or "").startswith("foundry/task-")
-    ]
-
-
-def _view_pr_feedback(settings: Settings, pr_number: int) -> dict[str, Any]:
-    result = _gh_run_with_retry(
-        [
-            "gh",
-            "pr",
-            "view",
-            str(pr_number),
-            "--repo",
-            settings.target_repo,
-            "--json",
-            "number,title,headRefName,url,reviews,comments,statusCheckRollup",
-        ]
-    )
-    return json.loads(result.stdout or "{}")
-
-
-def _task_for_pr(settings: Settings, pr: dict[str, Any]) -> Task | None:
-    branch = str(pr.get("headRefName") or "")
+def _task_for_change(settings: Settings, change: ForgeChange) -> Task | None:
     for task in state.list_tasks(settings.db_path):
-        if task.branch_name == branch or task.pr_url == pr.get("url"):
+        if task.branch_name == change.branch or task.pr_url == change.url:
             return task
-
     prefix = "foundry/task-"
-    if branch.startswith(prefix):
+    if change.branch.startswith(prefix):
         try:
-            return state.get_task(settings.db_path, int(branch.removeprefix(prefix)))
+            return state.get_task(
+                settings.db_path, int(change.branch.removeprefix(prefix))
+            )
         except ValueError:
             return None
     return None
 
 
 def _prepare_pr_feedback_worktree(
-    settings: Settings, task: Task, branch_name: str
+    settings: Settings,
+    task: Task,
+    branch_name: str,
+    provider: ForgeProvider | None = None,
 ) -> tuple[Path, Path]:
+    active_provider = provider or provider_for(settings)
     base = worktree.ensure_base_repo(
         settings.worktree_root,
-        settings.source_repo,
+        settings.target_repo,
         settings.base_branch,
+        active_provider,
     )
     wt_path = (settings.worktree_root / f"task-{task.id}-pr-feedback").resolve()
     if wt_path.exists():
@@ -386,6 +281,7 @@ def _block_for_human(
     reason: str,
     questions: str,
     worktree_path: Path | None,
+    provider: ForgeProvider | None = None,
 ) -> Task:
     comment = "\n".join(
         part
@@ -405,7 +301,7 @@ def _block_for_human(
         input={"blocked_stage": blocked_stage.value},
     ) as finish:
         result = issue_comment_stage.run(
-            task, settings, comment, cwd=worktree_path
+            task, settings, comment, cwd=worktree_path, provider=provider
         )
         finish(output={"issue_number": task.issue_number})
     state.append_log(
@@ -461,7 +357,9 @@ def _prepare_dev_worktree(settings: Settings, task: Task, base: Path) -> tuple[T
 
 
 @observe(name="workflow.dev_task")
-def dev_task(settings: Settings, task: Task) -> Task:
+def dev_task(
+    settings: Settings, task: Task, provider: ForgeProvider | None = None
+) -> Task:
     """Issue-driven development workflow.
 
     Flow: context → plan → (implement → verify) × up to N attempts → pr.
@@ -471,6 +369,7 @@ def dev_task(settings: Settings, task: Task) -> Task:
     them into task status per `PRE_IMPLEMENT_STAGES` policy.
     """
     log.info("workflow.dev_task.start", task_id=task.id, issue=task.issue_number)
+    active_provider = provider or provider_for(settings)
 
     if task.pr_url:
         log.info("task.skip_already_has_pr", task_id=task.id, pr_url=task.pr_url)
@@ -487,8 +386,9 @@ def dev_task(settings: Settings, task: Task) -> Task:
 
     base = worktree.ensure_base_repo(
         settings.worktree_root,
-        settings.source_repo,
+        settings.target_repo,
         settings.base_branch,
+        active_provider,
     )
     task, wt_path, branch_name = _prepare_dev_worktree(settings, task, base)
 
@@ -543,6 +443,7 @@ def dev_task(settings: Settings, task: Task) -> Task:
             reason="plan requested human verification",
             questions=strip_human_input_marker(plan_text),
             worktree_path=wt_path,
+            provider=active_provider,
         )
 
     # IMPLEMENT → VERIFY quality-gate loop
@@ -648,6 +549,7 @@ def dev_task(settings: Settings, task: Task) -> Task:
                     impl_result.get("response") or impl_result.get("result")
                 ),
                 worktree_path=wt_path,
+                provider=active_provider,
             )
 
         # VERIFY
@@ -707,6 +609,7 @@ def dev_task(settings: Settings, task: Task) -> Task:
                 ),
                 questions=decision.report,
                 worktree_path=wt_path,
+                provider=active_provider,
             )
         if not decision.retryable:
             raise RuntimeError(
@@ -726,7 +629,12 @@ def dev_task(settings: Settings, task: Task) -> Task:
         task = _mark(settings, task, stage=Stage.PR)
         with stage_span(settings.db_path, task.id, Stage.PR.value) as finish:
             pr_result = pr_stage.run(
-                task, wt_path, branch_name, settings, report=decision.report
+                task,
+                wt_path,
+                branch_name,
+                settings,
+                report=decision.report,
+                provider=active_provider,
             )
             task.pr_url = pr_result["pr_url"]
             finish(output={"pr_url": pr_result["pr_url"]})
@@ -845,8 +753,9 @@ def pr_verify(
 def pr_feedback(
     settings: Settings,
     task: Task,
-    pr: dict[str, Any],
-    feedback: str,
+    change: ForgeChange,
+    feedback: ChangeFeedback,
+    provider: ForgeProvider | None = None,
 ) -> Task:
     """Apply requested PR feedback on the existing PR branch.
 
@@ -854,18 +763,20 @@ def pr_feedback(
     implement agent with that feedback, verifies the result, pushes one commit
     back to the same branch, and posts a PR comment.
     """
-    branch_name = str(pr.get("headRefName") or task.branch_name or "")
+    active_provider = provider or provider_for(settings)
+    branch_name = change.branch or task.branch_name or ""
     if not branch_name:
-        raise RuntimeError(f"PR #{pr.get('number')} has no head branch")
+        raise RuntimeError(f"change request #{change.number} has no head branch")
+    feedback_text = feedback.format()
 
     log.info(
         "workflow.pr_feedback.start",
         task_id=task.id,
-        pr_number=pr.get("number"),
+        change_number=change.number,
         branch=branch_name,
     )
     task.branch_name = branch_name
-    task.pr_url = str(pr.get("url") or task.pr_url or "")
+    task.pr_url = change.url or task.pr_url
     task.status = TaskStatus.PENDING
     task.current_stage = Stage.IMPLEMENT
     task = state.upsert_task(settings.db_path, task)
@@ -878,10 +789,12 @@ def pr_feedback(
             "workflow": WorkflowName.PR_FEEDBACK.value,
             "status": TaskStatus.PENDING.value,
             "stage": Stage.IMPLEMENT.value,
-            "pr_number": pr.get("number"),
-            "pr_url": pr.get("url"),
+            "forge": active_provider.kind.value,
+            "change_number": change.number,
+            "change_url": change.url,
             "branch": branch_name,
-            "feedback": feedback,
+            "feedback": feedback_text,
+            "feedback_fingerprint": feedback.fingerprint,
         },
     )
     state.append_log(
@@ -890,19 +803,21 @@ def pr_feedback(
         Stage.IMPLEMENT,
         {
             "workflow": WorkflowName.PR_FEEDBACK.value,
-            "pr_number": pr.get("number"),
+            "change_number": change.number,
             "branch": branch_name,
-            "feedback": feedback,
+            "feedback_fingerprint": feedback.fingerprint,
         },
     )
 
-    base, wt_path = _prepare_pr_feedback_worktree(settings, task, branch_name)
+    base, wt_path = _prepare_pr_feedback_worktree(
+        settings, task, branch_name, active_provider
+    )
     task.worktree_path = str(wt_path)
     task.status = TaskStatus.RUNNING
     task = state.upsert_task(settings.db_path, task)
 
     try:
-        implement_input = _build_pr_feedback_input(pr, feedback)
+        implement_input = _build_pr_feedback_input(change, feedback_text)
         impl_agent_settings = AgentSettings.from_env(
             AgentStage.IMPLEMENT, db_path=settings.db_path
         )
@@ -920,7 +835,7 @@ def pr_feedback(
             Stage.IMPLEMENT.value,
             input={
                 "workflow": WorkflowName.PR_FEEDBACK.value,
-                "pr_number": pr.get("number"),
+                "change_number": change.number,
                 "prompt": impl_prompt,
             },
             agent={
@@ -957,6 +872,7 @@ def pr_feedback(
                     impl_result.get("response") or impl_result.get("result")
                 ),
                 worktree_path=wt_path,
+                provider=active_provider,
             )
 
         task = _mark(settings, task, stage=Stage.VERIFY)
@@ -966,7 +882,7 @@ def pr_feedback(
             Stage.VERIFY.value,
             input={
                 "workflow": WorkflowName.PR_FEEDBACK.value,
-                "pr_number": pr.get("number"),
+                "change_number": change.number,
             },
         ) as finish:
             verify_raw = verify_stage.run(
@@ -1002,6 +918,7 @@ def pr_feedback(
                     reason="verify requires human intervention after PR feedback fix",
                     questions=decision.report,
                     worktree_path=wt_path,
+                    provider=active_provider,
                 )
             raise RuntimeError(
                 "PR feedback fix did not pass verification: " + decision.report
@@ -1015,7 +932,7 @@ def pr_feedback(
             Stage.PR.value,
             input={
                 "workflow": WorkflowName.PR_FEEDBACK.value,
-                "pr_number": pr.get("number"),
+                "change_number": change.number,
             },
         ) as finish:
             push_result = pr_stage.commit_and_push_changes(
@@ -1029,18 +946,8 @@ def pr_feedback(
                     decision.report.strip() or "Verification passed.",
                 ]
             )
-            shell.run(
-                [
-                    "gh",
-                    "pr",
-                    "comment",
-                    str(pr.get("number")),
-                    "--repo",
-                    settings.target_repo,
-                    "--body",
-                    comment,
-                ],
-                cwd=wt_path,
+            active_provider.comment_change(
+                settings.target_repo, change.number, comment
             )
             finish(output={**push_result, "commented": True})
         state.append_log(
@@ -1058,18 +965,16 @@ def pr_feedback(
         log.info(
             "workflow.pr_feedback.done",
             task_id=task.id,
-            pr_number=pr.get("number"),
+            change_number=change.number,
         )
         return task
     finally:
         worktree.cleanup_worktree(base, wt_path)
 
 
-def _feedback_hash(feedback: str) -> str:
-    return hashlib.sha256(feedback.encode()).hexdigest()[:16]
-
-
-def pr_feedback_once(settings: Settings) -> list[Task]:
+def pr_feedback_once(
+    settings: Settings, provider: ForgeProvider | None = None
+) -> list[Task]:
     """Run one PR feedback pass for open `foundry/task-*` PRs.
 
     Deduplication: the feedback string is hashed and stored in repo_memory as
@@ -1078,34 +983,34 @@ def pr_feedback_once(settings: Settings) -> list[Task]:
     polling cycle.
     """
     state.init_db(settings.db_path)
+    active_provider = provider or provider_for(settings)
     processed: list[Task] = []
-    for listed_pr in _list_open_foundry_prs(settings):
-        pr = _view_pr_feedback(settings, int(listed_pr["number"]))
-        feedback = _format_pr_feedback(pr)
-        if not feedback:
+    for change in active_provider.list_changes(settings.target_repo):
+        feedback = active_provider.load_feedback(settings.target_repo, change)
+        if not feedback.actionable:
             continue
-        task = _task_for_pr(settings, pr)
+        task = _task_for_change(settings, change)
         if task is None:
             log.warning(
                 "workflow.pr_feedback.no_task",
-                pr_number=pr.get("number"),
-                branch=pr.get("headRefName"),
+                change_number=change.number,
+                branch=change.branch,
             )
             continue
 
         # Skip if this exact feedback was already processed
         hash_key = f"pr_feedback_hash:{task.id}"
-        current_hash = _feedback_hash(feedback)
+        current_hash = feedback.fingerprint
         stored = state.get_repo_memory(settings.db_path, settings.target_repo, hash_key)
         if stored == current_hash:
             log.info(
                 "workflow.pr_feedback.skip_unchanged",
                 task_id=task.id,
-                pr_number=pr.get("number"),
+                change_number=change.number,
             )
             continue
 
-        result = pr_feedback(settings, task, pr, feedback)
+        result = pr_feedback(settings, task, change, feedback, active_provider)
         # Persist hash so next pass skips unchanged feedback
         state.save_repo_memory(
             settings.db_path, settings.target_repo, hash_key, current_hash

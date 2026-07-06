@@ -12,6 +12,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+ARG GLAB_VERSION=1.99.0
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -19,6 +20,10 @@ RUN apt-get update \
         gh \
         git \
         openssh-client \
+    && arch="$(dpkg --print-architecture)" \
+    && case "$arch" in amd64|arm64) glab_arch="$arch" ;; *) exit 1 ;; esac \
+    && curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${glab_arch}.tar.gz" \
+        | tar -xz -C /usr/local/bin --strip-components=1 bin/glab \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=node_runtime /usr/local/bin /usr/local/bin

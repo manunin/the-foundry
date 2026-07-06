@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from foundry import state, workflows
 from foundry.config import Settings
 from foundry.events import read_events
-from foundry.models import Stage, Task, TaskStatus
+from foundry.forges import (
+    ChangeFeedback,
+    CheckResult,
+    FeedbackItem,
+    ForgeChange,
+)
+from foundry.models import ForgeKind, Stage, Task, TaskStatus
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -34,63 +40,42 @@ def _seed_task(db_path: Path) -> Task:
     return state.upsert_task(db_path, task)
 
 
-def test_format_pr_feedback_detects_requested_changes_and_failing_ci() -> None:
-    feedback = workflows._format_pr_feedback(
-        {
-            "reviews": [
-                {"state": "APPROVED", "body": "nice"},
-                {
-                    "state": "CHANGES_REQUESTED",
-                    "author": {"login": "reviewer"},
-                    "body": "Please add a regression test.",
-                },
-            ],
-            "statusCheckRollup": [
-                {"name": "unit", "conclusion": "SUCCESS"},
-                {"name": "lint", "conclusion": "FAILURE"},
-            ],
-            "comments": [{"body": "Also keep the public API stable."}],
-        }
+def test_change_feedback_formats_requested_changes_and_failing_ci() -> None:
+    feedback = ChangeFeedback(
+        items=(
+            FeedbackItem(
+                "review-1", "Please add a regression test.", "reviewer"
+            ),
+        ),
+        failing_checks=(CheckResult("check-1", "lint", "FAILURE"),),
     )
+    formatted = feedback.format()
 
-    assert "Requested changes" in feedback
-    assert "Please add a regression test." in feedback
-    assert "Failing CI" in feedback
-    assert "lint: FAILURE" in feedback
-    assert "Also keep the public API stable." in feedback
+    assert "Requested changes" in formatted
+    assert "Please add a regression test." in formatted
+    assert "Failing CI" in formatted
+    assert "lint: FAILURE" in formatted
 
 
 def test_pr_feedback_once_applies_fix_pushes_same_branch_and_comments(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     state.init_db(settings.db_path)
     task = _seed_task(settings.db_path)
-    listed_pr = {
-        "number": 7,
-        "title": "foundry: task",
-        "headRefName": "foundry/task-1",
-        "url": "https://github.com/owner/sandbox/pull/7",
-    }
-    viewed_pr = {
-        **listed_pr,
-        "reviews": [
-            {
-                "state": "CHANGES_REQUESTED",
-                "author": {"login": "reviewer"},
-                "body": "Add regression coverage.",
-            }
-        ],
-        "comments": [],
-        "statusCheckRollup": [],
-    }
-    comments: list[list[str]] = []
+    change = ForgeChange(
+        number=7,
+        title="foundry: task",
+        branch="foundry/task-1",
+        url="https://github.com/owner/sandbox/pull/7",
+    )
+    feedback = ChangeFeedback(
+        items=(FeedbackItem("review-1", "Add regression coverage.", "reviewer"),)
+    )
+    provider = MagicMock()
+    provider.kind = ForgeKind.GITHUB
+    provider.list_changes.return_value = [change]
+    provider.load_feedback.return_value = feedback
 
-    def _shell_run(cmd, cwd=None, check=True, timeout=120, env=None):
-        comments.append(cmd)
-        return type("Result", (), {"stdout": "", "stderr": "", "returncode": 0, "ok": True})()
-
-    with patch("foundry.workflows._list_open_foundry_prs", return_value=[listed_pr]), patch(
-        "foundry.workflows._view_pr_feedback", return_value=viewed_pr
-    ), patch(
+    with patch(
         "foundry.workflows._prepare_pr_feedback_worktree",
         return_value=(tmp_path / "base", tmp_path / "wt"),
     ), patch(
@@ -104,10 +89,8 @@ def test_pr_feedback_once_applies_fix_pushes_same_branch_and_comments(tmp_path: 
     ), patch(
         "foundry.workflows.pr_stage.commit_and_push_changes",
         return_value={"branch": "foundry/task-1", "files_changed": 1},
-    ) as push, patch(
-        "foundry.workflows.shell.run", side_effect=_shell_run
-    ):
-        processed = workflows.pr_feedback_once(settings)
+    ) as push:
+        processed = workflows.pr_feedback_once(settings, provider)
 
     assert [t.id for t in processed] == [task.id]
     final = state.get_task(settings.db_path, task.id)
@@ -120,7 +103,7 @@ def test_pr_feedback_once_applies_fix_pushes_same_branch_and_comments(tmp_path: 
     assert "Add regression coverage." in implement_input
     push.assert_called_once()
     assert push.call_args.args[2] == "foundry/task-1"
-    assert any(cmd[:3] == ["gh", "pr", "comment"] for cmd in comments)
+    provider.comment_change.assert_called_once()
 
     events = read_events(settings.db_path, task_id=task.id)
     feedback_events = [e for e in events if e.kind == "pr_feedback"]
@@ -136,23 +119,19 @@ def test_pr_feedback_once_skips_prs_without_requested_changes_or_failing_ci(
     settings = _settings(tmp_path)
     state.init_db(settings.db_path)
     _seed_task(settings.db_path)
-    listed_pr = {
-        "number": 7,
-        "title": "foundry: task",
-        "headRefName": "foundry/task-1",
-        "url": "https://github.com/owner/sandbox/pull/7",
-    }
-    viewed_pr = {
-        **listed_pr,
-        "reviews": [{"state": "APPROVED", "body": "nice"}],
-        "comments": [{"body": "ship it"}],
-        "statusCheckRollup": [{"name": "unit", "conclusion": "SUCCESS"}],
-    }
+    change = ForgeChange(
+        number=7,
+        title="foundry: task",
+        branch="foundry/task-1",
+        url="https://github.com/owner/sandbox/pull/7",
+    )
+    provider = MagicMock()
+    provider.kind = ForgeKind.GITHUB
+    provider.list_changes.return_value = [change]
+    provider.load_feedback.return_value = ChangeFeedback()
 
-    with patch("foundry.workflows._list_open_foundry_prs", return_value=[listed_pr]), patch(
-        "foundry.workflows._view_pr_feedback", return_value=viewed_pr
-    ), patch("foundry.workflows.pr_feedback") as apply_feedback:
-        processed = workflows.pr_feedback_once(settings)
+    with patch("foundry.workflows.pr_feedback") as apply_feedback:
+        processed = workflows.pr_feedback_once(settings, provider)
 
     assert processed == []
     apply_feedback.assert_not_called()

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from foundry import pipeline, state, workflows
 from foundry.config import Settings
@@ -38,6 +38,36 @@ def _seed_task(db_path: Path) -> Task:
         issue_body="please",
     )
     return state.upsert_task(db_path, task)
+
+
+def test_feedback_worktree_clones_target_repo_when_source_differs(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        source_repo="issues/source",
+        target_repo="code/target",
+        issue_label="agent-task",
+        worktree_root=tmp_path / "worktrees",
+        db_path=tmp_path / "foundry.sqlite",
+        poll_interval_seconds=30,
+    )
+    task = Task("issues/source", 3, "Fix", "", id=1)
+    provider = MagicMock()
+    base = tmp_path / "base"
+
+    with patch(
+        "foundry.workflows.worktree.ensure_base_repo", return_value=base
+    ) as ensure_base, patch("foundry.workflows.shell.run"):
+        workflows._prepare_pr_feedback_worktree(
+            settings, task, "foundry/task-1", provider
+        )
+
+    ensure_base.assert_called_once_with(
+        settings.worktree_root,
+        "code/target",
+        settings.base_branch,
+        provider,
+    )
 
 
 # ----- normalize_verification ---------------------------------------------
@@ -333,7 +363,7 @@ def test_dev_task_human_blocked_stops_after_one_attempt(tmp_path: Path) -> None:
         ),
         patch(
             "foundry.workflows.issue_comment_stage.run",
-            side_effect=lambda task, settings, body, cwd=None: comments.append(body)
+            side_effect=lambda task, settings, body, cwd=None, provider=None: comments.append(body)
             or {"issue_number": task.issue_number, "comment": body},
         ),
         patch("foundry.workflows.pr_stage.run"),
@@ -382,7 +412,7 @@ def test_dev_task_unclear_plan_comments_and_blocks(tmp_path: Path) -> None:
         ),
         patch(
             "foundry.workflows.issue_comment_stage.run",
-            side_effect=lambda task, settings, body, cwd=None: comments.append(body)
+            side_effect=lambda task, settings, body, cwd=None, provider=None: comments.append(body)
             or {"issue_number": task.issue_number, "comment": body},
         ),
         patch(
@@ -427,7 +457,7 @@ def test_dev_task_unclear_implement_comments_and_blocks(tmp_path: Path) -> None:
         ),
         patch(
             "foundry.workflows.issue_comment_stage.run",
-            side_effect=lambda task, settings, body, cwd=None: comments.append(body)
+            side_effect=lambda task, settings, body, cwd=None, provider=None: comments.append(body)
             or {"issue_number": task.issue_number, "comment": body},
         ),
     ]

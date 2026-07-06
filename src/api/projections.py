@@ -78,6 +78,10 @@ class UiTask(BaseModel):
     repo: str
     issue_number: int
     issue_title: str
+    forge: str
+    forge_host: str
+    issue_url: str
+    change_kind: Literal["PR", "MR"]
     status: str
     current_stage: str
     attempts: int
@@ -201,6 +205,10 @@ def project_task(
         repo=task.repo,
         issue_number=task.issue_number,
         issue_title=task.issue_title,
+        forge=task.forge.value,
+        forge_host=task.forge_host,
+        issue_url=task.issue_url or _issue_url(task),
+        change_kind="MR" if task.forge.value == "gitlab" else "PR",
         status=task.status.value,
         current_stage=alias_stage(task.current_stage.value),
         attempts=task.attempts,
@@ -259,3 +267,7 @@ def _fold_trace_span(
             )
     elif span_type == "backoff":
         summary.backoff_duration_ms += duration
+
+def _issue_url(task: Task) -> str:
+    separator = "/-/issues/" if task.forge.value == "gitlab" else "/issues/"
+    return f"https://{task.forge_host}/{task.repo}{separator}{task.issue_number}"

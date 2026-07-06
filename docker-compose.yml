@@ -17,7 +17,8 @@ services:
     volumes:
       - ./data:/app/data
       - ./worktrees:/app/worktrees
-      - ${HOME}/.config/gh:/root/.config/gh:ro
+      - ${HOST_GH_CONFIG_DIR:-./.docker/gh}:/root/.config/gh:ro
+      - ${HOST_GLAB_CONFIG_DIR:-./.docker/glab-cli}:/root/.config/glab-cli
     ports:
       - "8000:8000"
     healthcheck:
@@ -48,10 +49,11 @@ services:
     volumes:
       - ./data:/app/data
       - ./worktrees:/app/worktrees
-      - ${HOME}/.config/gh:/root/.config/gh:ro
+      - ${HOST_GH_CONFIG_DIR:-./.docker/gh}:/root/.config/gh:ro
+      - ${HOST_GLAB_CONFIG_DIR:-./.docker/glab-cli}:/root/.config/glab-cli
       # Uncomment the auth directory for the real coding backend you use.
       # - ${HOME}/.claude:/root/.claude
-      - ${HOME}/.codex:/root/.codex
+      - ${HOST_CODEX_DIR:-./.docker/codex}:/root/.codex
       # - ${HOME}/.local/share/opencode:/root/.local/share/opencode
     command: ["foundry", "run"]
     depends_on:
@@ -80,9 +82,10 @@ services:
     volumes:
       - ./data:/app/data
       - ./worktrees:/app/worktrees
-      - ${HOME}/.config/gh:/root/.config/gh:ro
+      - ${HOST_GH_CONFIG_DIR:-./.docker/gh}:/root/.config/gh:ro
+      - ${HOST_GLAB_CONFIG_DIR:-./.docker/glab-cli}:/root/.config/glab-cli
       # - ${HOME}/.claude:/root/.claude
-      - ${HOME}/.codex:/root/.codex
+      - ${HOST_CODEX_DIR:-./.docker/codex}:/root/.codex
       # - ${HOME}/.local/share/opencode:/root/.local/share/opencode
     command: ["foundry", "pr-feedback"]
     depends_on:

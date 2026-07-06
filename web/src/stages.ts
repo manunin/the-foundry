@@ -14,5 +14,5 @@ export const STAGES: StageMeta[] = [
   { id: "agent_plan", label: "plan", title: "Agent plan" },
   { id: "agent_implement", label: "implement", title: "Agent implement" },
   { id: "verify", label: "verify", title: "Verify" },
-  { id: "pr", label: "pr", title: "Open PR" },
+  { id: "pr", label: "change", title: "Open change request" },
 ];

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from foundry import state
 from foundry.config import Settings
-from foundry.models import Task
+from foundry.events import read_events, record_event
+from foundry.forges import ForgeComment
+from foundry.models import Stage, Task, TaskStatus
 from foundry.shell import Result
 from foundry.stages import fetch as fetch_stage
 
@@ -122,3 +125,115 @@ def test_fetch_includes_pending_tasks_from_sqlite_queue(tmp_path: Path) -> None:
         tasks = fetch_stage.fetch(settings)
 
     assert [task.id for task in tasks] == [queued.id]
+
+
+def test_fetch_resumes_blocked_plan_with_comment_and_previous_draft(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    state.init_db(settings.db_path)
+    task = state.upsert_task(
+        settings.db_path,
+        Task(
+            repo=settings.source_repo,
+            issue_number=7,
+            issue_title="Create file",
+            issue_body="Create a Markdown file.",
+            status=TaskStatus.BLOCKED,
+            current_stage=Stage.PLAN,
+            worktree_path=str(tmp_path / "worktrees" / "task-1"),
+            branch_name="foundry/task-1",
+        ),
+    )
+    state.save_stage_result(
+        settings.db_path, task.id, Stage.CONTEXT, {"repo": task.repo}
+    )
+    state.save_stage_result(
+        settings.db_path,
+        task.id,
+        Stage.PLAN,
+        {"plan": "Draft plan\n\nWhich filename?\n\nNEED_VERIFICATION"},
+    )
+    record_event(
+        settings.db_path,
+        task.id,
+        Stage.ISSUE_COMMENT.value,
+        "stage_finished",
+        {"output": {"issue_number": 7}},
+    )
+    provider = MagicMock()
+    provider.list_issues.return_value = []
+    provider.list_issue_comments.return_value = [
+        ForgeComment(
+            "note-2",
+            "Use test-foundry.md.",
+            "maintainer",
+            int(time.time() * 1000) + 1_000,
+        )
+    ]
+
+    tasks = fetch_stage.fetch(settings, provider)
+
+    assert [item.id for item in tasks] == [task.id]
+    resumed = state.get_task(settings.db_path, task.id)
+    assert resumed is not None
+    assert resumed.status == TaskStatus.PENDING
+    assert resumed.current_stage == Stage.PLAN
+    assert resumed.worktree_path == task.worktree_path
+    assert "Draft plan" in resumed.issue_body
+    assert "Use test-foundry.md." in resumed.issue_body
+    assert state.get_stage_result(
+        settings.db_path, task.id, Stage.CONTEXT
+    ) == {"repo": task.repo}
+    assert state.get_stage_result(settings.db_path, task.id, Stage.PLAN) is None
+    clarification_events = [
+        event
+        for event in read_events(settings.db_path, task.id)
+        if event.kind == "human_clarification_received"
+    ]
+    assert clarification_events[-1].payload["comment_ids"] == ["note-2"]
+
+
+def test_fetch_does_not_reuse_processed_clarification(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    state.init_db(settings.db_path)
+    task = state.upsert_task(
+        settings.db_path,
+        Task(
+            repo=settings.source_repo,
+            issue_number=8,
+            issue_title="Blocked",
+            issue_body="Body",
+            status=TaskStatus.BLOCKED,
+            current_stage=Stage.PLAN,
+        ),
+    )
+    record_event(
+        settings.db_path,
+        task.id,
+        Stage.ISSUE_COMMENT.value,
+        "stage_finished",
+        {},
+    )
+    record_event(
+        settings.db_path,
+        task.id,
+        Stage.FETCH.value,
+        "human_clarification_received",
+        {"comment_ids": ["note-1"], "authors": ["maintainer"]},
+    )
+    provider = MagicMock()
+    provider.list_issues.return_value = []
+    provider.list_issue_comments.return_value = [
+        ForgeComment(
+            "note-1",
+            "Already processed.",
+            "maintainer",
+            int(time.time() * 1000) + 1_000,
+        )
+    ]
+
+    tasks = fetch_stage.fetch(settings, provider)
+
+    assert tasks == []
+    assert state.get_task(settings.db_path, task.id).status == TaskStatus.BLOCKED

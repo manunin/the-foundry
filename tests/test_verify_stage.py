@@ -223,6 +223,26 @@ def test_deterministic_failure_short_circuits_agent(tmp_path: Path) -> None:
     agent_mock.assert_not_called()
 
 
+def test_deterministic_failure_reports_stdout_and_stderr(tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    settings = _settings(tmp_path, verify_commands=(("ruff", "check", "."),))
+    result = Result(
+        returncode=1,
+        stdout="F401 unused import",
+        stderr="uv installed package",
+    )
+
+    with patch.object(
+        verify_stage.shell, "run", return_value=result
+    ), patch.object(verify_stage.agent_verify_stage, "run") as agent_mock:
+        verification = verify_stage.run(_task(), wt, settings)
+
+    assert "F401 unused import" in verification["report"]
+    assert "uv installed package" in verification["report"]
+    agent_mock.assert_not_called()
+
+
 def test_agent_fail_returns_acceptance(tmp_path: Path) -> None:
     wt = tmp_path / "wt"
     wt.mkdir()
@@ -286,6 +306,82 @@ def test_shell_timeout_is_infra(tmp_path: Path) -> None:
     assert result["retryable"] is True
     assert result["requires_human"] is False
     assert "timeout" in result["report"].lower()
+    agent_mock.assert_not_called()
+
+
+def test_diff_capture_uses_verify_command_timeout(tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    settings = _settings(
+        tmp_path,
+        verify_commands=(),
+        verify_command_timeout_sec=417,
+    )
+    timeouts: list[int] = []
+
+    def _run(cmd, **kwargs):
+        if cmd[:2] == ["git", "add"] or cmd[:2] == ["git", "diff"]:
+            timeouts.append(kwargs["timeout"])
+        return _ok()
+
+    with patch.object(verify_stage.shell, "run", side_effect=_run), \
+         patch.object(verify_stage, "_agent_backend_is_stub", return_value=False), \
+         patch.object(
+             verify_stage.agent_verify_stage,
+             "run",
+             return_value={"response": "PASS"},
+         ):
+        result = verify_stage.run(_task(), wt, settings)
+
+    assert result["passed"] is True
+    assert timeouts == [417, 417]
+
+
+def test_diff_capture_timeout_is_infra(tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    settings = _settings(
+        tmp_path,
+        verify_commands=(),
+        verify_command_timeout_sec=417,
+    )
+
+    def _run(cmd, **kwargs):
+        if cmd[:2] == ["git", "add"]:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs["timeout"])
+        return _ok()
+
+    with patch.object(verify_stage.shell, "run", side_effect=_run), \
+         patch.object(verify_stage, "_agent_backend_is_stub", return_value=False), \
+         patch.object(verify_stage.agent_verify_stage, "run") as agent_mock:
+        result = verify_stage.run(_task(), wt, settings)
+
+    assert result["passed"] is False
+    assert result["failure_kind"] == "infra"
+    assert result["retryable"] is True
+    assert "417s" in result["report"]
+    agent_mock.assert_not_called()
+
+
+def test_diff_capture_git_failure_is_infra(tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    settings = _settings(tmp_path, verify_commands=())
+
+    def _run(cmd, **kwargs):
+        if cmd[:2] == ["git", "add"]:
+            return _fail(128, "index.lock exists")
+        return _ok()
+
+    with patch.object(verify_stage.shell, "run", side_effect=_run), \
+         patch.object(verify_stage, "_agent_backend_is_stub", return_value=False), \
+         patch.object(verify_stage.agent_verify_stage, "run") as agent_mock:
+        result = verify_stage.run(_task(), wt, settings)
+
+    assert result["passed"] is False
+    assert result["failure_kind"] == "infra"
+    assert result["retryable"] is True
+    assert "index.lock exists" in result["report"]
     agent_mock.assert_not_called()
 
 

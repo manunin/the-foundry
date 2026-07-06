@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from api.projections import project_task
-from foundry.models import Event, Stage, Task, TaskStatus
+from foundry.models import Event, ForgeKind, Stage, Task, TaskStatus
 
 
 def _task(**overrides) -> Task:
@@ -192,3 +192,17 @@ def test_project_task_aggregates_agent_trace_timings() -> None:
     assert trace.time_to_first_event_ms == 12
     assert trace.time_to_first_text_ms == 25
     assert trace.slowest_tools[0].name == "Bash"
+
+
+def test_project_task_builds_legacy_gitlab_issue_url_and_mr_kind() -> None:
+    task = _task(
+        forge=ForgeKind.GITLAB,
+        forge_host="gitlab.example",
+        issue_url=None,
+        pr_url="https://gitlab.example/owner/repo/-/merge_requests/3",
+    )
+
+    ui = project_task(task, events=[])
+
+    assert ui.issue_url == "https://gitlab.example/owner/repo/-/issues/42"
+    assert ui.change_kind == "MR"

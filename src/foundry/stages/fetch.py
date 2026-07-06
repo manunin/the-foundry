@@ -1,10 +1,16 @@
 from __future__ import annotations
 
-import json
-
-from .. import shell, state
-from ..config import Settings
-from ..models import Stage, Task, TaskStatus
+from foundry import shell, state  # noqa: F401
+from foundry.config import Settings
+from foundry.events import read_events, record_event
+from foundry.forges import (
+    ForgeComment,
+    ForgeIssue,
+    ForgeProvider,
+    IssueQuery,
+    provider_for,
+)
+from foundry.models import Stage, Task, TaskStatus
 
 
 PRIORITY_RANK = {
@@ -19,80 +25,63 @@ def _issue_labels(settings: Settings) -> tuple[str, ...]:
     )
 
 
-def _issue_list_cmd(settings: Settings) -> list[str]:
-    cmd = [
-        "gh", "issue", "list",
-        "--repo", settings.source_repo,
-        "--state", "open",
-        "--json", "number,title,body,labels",
-        "--limit", str(settings.issue_limit),
-    ]
-    for label in _issue_labels(settings):
-        cmd.extend(["--label", label])
-    if settings.issue_assignee:
-        cmd.extend(["--assignee", settings.issue_assignee])
-    if settings.issue_milestone:
-        cmd.extend(["--milestone", settings.issue_milestone])
-    return cmd
-
-
-def _issue_priority(issue: dict) -> int:
-    labels = issue.get("labels") or []
-    names = {
-        label.get("name", "").lower()
-        for label in labels
-        if isinstance(label, dict)
-    }
+def _issue_priority(issue: ForgeIssue) -> int:
+    names = {label.lower() for label in issue.labels}
     return min(
         (PRIORITY_RANK[name] for name in names if name in PRIORITY_RANK),
         default=99,
     )
 
 
-def _issue_to_task(settings: Settings, issue: dict) -> Task:
+def _issue_to_task(settings: Settings, issue: ForgeIssue) -> Task:
     return Task(
         repo=settings.source_repo,
-        issue_number=issue["number"],
-        issue_title=issue["title"],
-        issue_body=issue.get("body") or "",
+        issue_number=issue.number,
+        issue_title=issue.title,
+        issue_body=issue.body,
+        forge=settings.forge,
+        forge_host=settings.forge_host,
+        issue_url=issue.url,
     )
 
 
-def _upsert_issue(settings: Settings, issue: dict) -> Task:
+def _upsert_issue(settings: Settings, issue: ForgeIssue) -> Task:
     task = _issue_to_task(settings, issue)
     return state.upsert_task(settings.db_path, task)
 
 
-def fetch_issue(settings: Settings, issue_number: int) -> Task:
+def fetch_issue(
+    settings: Settings, issue_number: int, provider: ForgeProvider | None = None
+) -> Task:
     """Upsert a single issue for a manual run, bypassing label queue filters."""
-    result = shell.run(
-        [
-            "gh",
-            "issue",
-            "view",
-            str(issue_number),
-            "--repo", settings.source_repo,
-            "--json", "number,title,body",
-        ]
+    issue = (provider or provider_for(settings)).get_issue(
+        settings.source_repo, issue_number
     )
-    issue = json.loads(result.stdout or "{}")
     return _upsert_issue(settings, issue)
 
 
-def fetch(settings: Settings) -> list[Task]:
+def fetch(settings: Settings, provider: ForgeProvider | None = None) -> list[Task]:
     """Pull open issues with the configured label and upsert into the DB.
 
     Returns the list of tasks that are ready to be processed (pending status).
     """
-    result = shell.run(_issue_list_cmd(settings))
-    issues = json.loads(result.stdout or "[]")
+    active_provider = provider or provider_for(settings)
+    issues = active_provider.list_issues(
+        settings.source_repo,
+        IssueQuery(
+            labels=_issue_labels(settings),
+            assignee=settings.issue_assignee,
+            milestone=settings.issue_milestone,
+            limit=settings.issue_limit,
+        ),
+    )
     issues = sorted(issues, key=_issue_priority)
 
     ready: list[Task] = []
     ready_ids: set[int] = set()
     for issue in issues:
         existing = state.get_task_by_issue(
-            settings.db_path, settings.source_repo, issue["number"]
+            settings.db_path, settings.source_repo, issue.number
         )
         if existing is None:
             task = _upsert_issue(settings, issue)
@@ -105,6 +94,15 @@ def fetch(settings: Settings) -> list[Task]:
                 ready.append(existing)
                 if existing.id is not None:
                     ready_ids.add(existing.id)
+    for task in state.list_tasks(settings.db_path, TaskStatus.BLOCKED):
+        if task.repo != settings.source_repo:
+            continue
+        resumed = _resume_from_issue_comments(settings, task, active_provider)
+        if resumed is None:
+            continue
+        ready.append(resumed)
+        if resumed.id is not None:
+            ready_ids.add(resumed.id)
     for task in state.list_tasks(settings.db_path, TaskStatus.PENDING):
         if task.repo != settings.source_repo or task.id in ready_ids:
             continue
@@ -124,3 +122,85 @@ def fetch(settings: Settings) -> list[Task]:
         }:
             ready.append(task)
     return ready
+
+
+def _resume_from_issue_comments(
+    settings: Settings,
+    task: Task,
+    provider: ForgeProvider,
+) -> Task | None:
+    if task.id is None:
+        return None
+    events = read_events(settings.db_path, task.id)
+    blocked_events = [
+        event
+        for event in events
+        if event.stage == Stage.ISSUE_COMMENT.value
+        and event.kind in {"stage_started", "stage_finished"}
+    ]
+    if not blocked_events:
+        return None
+    processed_ids = {
+        str(comment_id)
+        for event in events
+        if event.kind == "human_clarification_received"
+        for comment_id in event.payload.get("comment_ids", [])
+    }
+    comments = provider.list_issue_comments(task.repo, task.issue_number)
+    clarifications = [
+        comment
+        for comment in comments
+        if comment.created_at_ms > blocked_events[0].ts_ms
+        and comment.external_id not in processed_ids
+        and not _is_foundry_comment(comment)
+        and comment.body
+    ]
+    if not clarifications:
+        return None
+
+    clarification_text = "\n\n".join(
+        f"{comment.author}: {comment.body}" for comment in clarifications
+    )
+    continuation_parts = [task.issue_body.rstrip()]
+    if task.current_stage == Stage.PLAN:
+        previous_plan = state.get_stage_result(
+            settings.db_path, task.id, Stage.PLAN
+        )
+        if previous_plan and previous_plan.get("plan"):
+            continuation_parts.extend(
+                [
+                    "## Previous planning draft (not final)",
+                    str(previous_plan["plan"]).strip(),
+                ]
+            )
+    continuation_parts.extend(
+        [
+            "## Human clarification from issue comments",
+            clarification_text,
+            (
+                "Continue the blocked stage using the previous work and this "
+                "clarification. Ask again if more information is required."
+            ),
+        ]
+    )
+    task.issue_body = "\n\n".join(continuation_parts).strip()
+    task = state.resume_task_with_clarification(settings.db_path, task)
+    record_event(
+        settings.db_path,
+        task.id,
+        Stage.FETCH.value,
+        "human_clarification_received",
+        {
+            "comment_ids": [
+                comment.external_id for comment in clarifications
+            ],
+            "authors": sorted({comment.author for comment in clarifications}),
+        },
+    )
+    return task
+
+
+def _is_foundry_comment(comment: ForgeComment) -> bool:
+    return comment.body.startswith(
+        "The Foundry needs human input before continuing this task."
+    )

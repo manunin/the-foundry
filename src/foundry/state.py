@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from .models import Stage, Task, TaskStatus, _now_iso
+from foundry.models import ForgeKind, Stage, Task, TaskStatus, _now_iso
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     issue_number INTEGER NOT NULL,
     issue_title TEXT NOT NULL,
     issue_body TEXT NOT NULL,
+    forge TEXT NOT NULL DEFAULT 'github',
+    forge_host TEXT NOT NULL DEFAULT 'github.com',
+    issue_url TEXT,
     status TEXT NOT NULL,
     current_stage TEXT NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -80,6 +83,7 @@ def init_db(db_path: Path) -> None:
         try:
             with _connect(db_path) as conn:
                 conn.executescript(SCHEMA)
+                _migrate_tasks(conn)
             return
         except sqlite3.OperationalError as e:
             if (
@@ -93,6 +97,20 @@ def init_db(db_path: Path) -> None:
 def _is_transient_init_error(error: sqlite3.OperationalError) -> bool:
     message = str(error).lower()
     return "disk i/o error" in message or "database is locked" in message
+
+
+def _migrate_tasks(conn: sqlite3.Connection) -> None:
+    columns = {
+        str(row["name"]) for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+    }
+    additions = {
+        "forge": "TEXT NOT NULL DEFAULT 'github'",
+        "forge_host": "TEXT NOT NULL DEFAULT 'github.com'",
+        "issue_url": "TEXT",
+    }
+    for name, definition in additions.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
 
 
 @contextmanager
@@ -113,6 +131,9 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         issue_number=row["issue_number"],
         issue_title=row["issue_title"],
         issue_body=row["issue_body"],
+        forge=ForgeKind(row["forge"]),
+        forge_host=row["forge_host"],
+        issue_url=row["issue_url"],
         status=TaskStatus(row["status"]),
         current_stage=Stage(row["current_stage"]),
         attempts=row["attempts"],
@@ -160,17 +181,21 @@ def upsert_task(db_path: Path, task: Task) -> Task:
                 """
                 INSERT INTO tasks (
                     repo, issue_number, issue_title, issue_body,
+                    forge, forge_host, issue_url,
                     status, current_stage, attempts,
                     worktree_path, branch_name, pr_url, logs_json,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task.repo,
                     task.issue_number,
                     task.issue_title,
                     task.issue_body,
+                    task.forge.value,
+                    task.forge_host,
+                    task.issue_url,
                     task.status.value,
                     task.current_stage.value,
                     task.attempts,
@@ -188,6 +213,7 @@ def upsert_task(db_path: Path, task: Task) -> Task:
                 """
                 UPDATE tasks SET
                     issue_title = ?, issue_body = ?,
+                    forge = ?, forge_host = ?, issue_url = ?,
                     status = ?, current_stage = ?, attempts = ?,
                     worktree_path = ?, branch_name = ?, pr_url = ?, logs_json = ?,
                     updated_at = ?
@@ -196,6 +222,9 @@ def upsert_task(db_path: Path, task: Task) -> Task:
                 (
                     task.issue_title,
                     task.issue_body,
+                    task.forge.value,
+                    task.forge_host,
+                    task.issue_url,
                     task.status.value,
                     task.current_stage.value,
                     task.attempts,
@@ -244,6 +273,61 @@ def reset_task_execution(db_path: Path, task: Task) -> Task:
         )
         conn.execute("DELETE FROM stage_results WHERE task_id = ?", (task.id,))
         conn.execute("DELETE FROM agent_sessions WHERE task_id = ?", (task.id,))
+    return task
+
+
+def resume_task_with_clarification(db_path: Path, task: Task) -> Task:
+    """Resume a blocked task while preserving completed upstream stages."""
+    if task.id is None:
+        raise ValueError("cannot resume an unsaved task")
+
+    stage_order = [
+        Stage.FETCH,
+        Stage.CONTEXT,
+        Stage.PLAN,
+        Stage.IMPLEMENT,
+        Stage.VERIFY,
+        Stage.PR,
+    ]
+    if task.current_stage not in stage_order:
+        raise ValueError(
+            f"cannot resume clarification from stage {task.current_stage.value}"
+        )
+    invalidated = stage_order[stage_order.index(task.current_stage) :]
+    invalidated_values = tuple(stage.value for stage in invalidated)
+
+    task.status = TaskStatus.PENDING
+    task.updated_at = _now_iso()
+    placeholders = ", ".join("?" for _ in invalidated_values)
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE tasks SET
+                issue_body = ?, status = ?, current_stage = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                task.issue_body,
+                task.status.value,
+                task.current_stage.value,
+                task.updated_at,
+                task.id,
+            ),
+        )
+        conn.execute(
+            f"""
+            DELETE FROM stage_results
+            WHERE task_id = ? AND stage IN ({placeholders})
+            """,
+            (task.id, *invalidated_values),
+        )
+        conn.execute(
+            f"""
+            DELETE FROM agent_sessions
+            WHERE task_id = ? AND stage IN ({placeholders})
+            """,
+            (task.id, *invalidated_values),
+        )
     return task
 
 

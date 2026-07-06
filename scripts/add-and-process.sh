@@ -22,7 +22,15 @@ set +a
 LABEL="${ISSUE_LABEL:-agent-task}"
 
 echo "==> creating issue in $SOURCE_REPO (label=$LABEL)"
-ISSUE_URL="$(gh issue create --repo "$SOURCE_REPO" --title "$TITLE" --body "$BODY" --label "$LABEL")"
+if [[ "${FORGE_PROVIDER:-github}" == "gitlab" ]]; then
+  host="${GITLAB_HOST:-${GL_HOST:-gitlab.com}}"
+  encoded_repo="${SOURCE_REPO//\//%2F}"
+  ISSUE_URL="$(glab api --hostname "$host" --method POST \
+    "/projects/$encoded_repo/issues" --field "title=$TITLE" \
+    --field "description=$BODY" --field "labels=$LABEL" --jq .web_url)"
+else
+  ISSUE_URL="$(gh issue create --repo "$SOURCE_REPO" --title "$TITLE" --body "$BODY" --label "$LABEL")"
+fi
 echo "    $ISSUE_URL"
 ISSUE_NUMBER="${ISSUE_URL##*/}"
 
@@ -30,8 +38,14 @@ ISSUE_NUMBER="${ISSUE_URL##*/}"
 # in the labeled listing before calling foundry, otherwise fetch may return 0.
 echo "==> waiting for issue #$ISSUE_NUMBER to appear in labeled listing"
 for i in 1 2 3 4 5 6 7 8 9 10; do
-  if gh issue list --repo "$SOURCE_REPO" --label "$LABEL" --state open --json number \
-       --jq ".[] | select(.number == $ISSUE_NUMBER) | .number" | grep -q "$ISSUE_NUMBER"; then
+  if [[ "${FORGE_PROVIDER:-github}" == "gitlab" ]]; then
+    visible="$(glab api --hostname "$host" \
+      "/projects/$encoded_repo/issues/$ISSUE_NUMBER" --jq .iid)"
+  else
+    visible="$(gh issue list --repo "$SOURCE_REPO" --label "$LABEL" --state open \
+      --json number --jq ".[] | select(.number == $ISSUE_NUMBER) | .number")"
+  fi
+  if grep -q "$ISSUE_NUMBER" <<<"$visible"; then
     echo "    visible after ${i}s"
     break
   fi

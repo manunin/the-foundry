@@ -1,5 +1,20 @@
 # The Foundry — Architecture Reference
 
+Forge-интеграция находится в `src/foundry/forges/`. GitHub (`gh`) остаётся
+default; GitLab (`glab`) выбирается через `FORGE_PROVIDER=gitlab`. Адаптер
+нормализует issues, PR/MR и feedback, поэтому FSM и persisted stage names не
+зависят от провайдера. Одна SQLite база соответствует одному forge/hostname.
+Issue operations идут в `SOURCE_REPO`, а clone/push/change-request operations —
+в `TARGET_REPO`.
+
+Blocked-задачи проверяют issue comments при каждом polling pass. Первый новый
+неслужебный комментарий после блокировки добавляется в task context. Completed
+upstream stages и worktree сохраняются; предыдущий planning draft передаётся
+обратно в PLAN, а invalidation начинается только с заблокированной стадии.
+Planner продолжает работу и может снова запросить уточнение до финального плана.
+Processed comment IDs фиксируются append-only событием
+`human_clarification_received`, поэтому один ответ не применяется дважды.
+
 Детальный технический разбор системы оркестрации. Документ структурирован так, чтобы ответить на ключевые вопросы о дизайне пайплайна.
 
 ---

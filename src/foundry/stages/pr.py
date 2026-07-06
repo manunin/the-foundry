@@ -4,9 +4,10 @@ from pathlib import Path
 
 from langfuse import observe
 
-from .. import shell
-from ..config import Settings
-from ..models import Task
+from foundry import shell
+from foundry.config import Settings
+from foundry.forges import ChangeRequestInput, ForgeProvider, provider_for
+from foundry.models import Task
 
 
 @observe(name="stage.pr")
@@ -16,6 +17,7 @@ def run(
     branch_name: str,
     settings: Settings,
     report: str | None = None,
+    provider: ForgeProvider | None = None,
 ) -> dict:
     """Commit, push and open a PR against settings.target_repo.
 
@@ -30,35 +32,30 @@ def run(
     )
 
     body_parts = [
-        "Automated PR from The Foundry (skeleton mode).",
-        "",
-        f"Closes #{task.issue_number}",
+        "Automated change request from The Foundry.",
         "",
         f"Issue: {task.issue_title}",
+        task.issue_url or _fallback_issue_url(task),
     ]
     if report:
         body_parts += ["", "## Отчёт", "", report.strip()]
     body = "\n".join(body_parts)
-    pr_result = shell.run(
-        [
-            "gh", "pr", "create",
-            "--repo", settings.target_repo,
-            "--head", branch_name,
-            "--base", settings.base_branch,
-            "--title", commit_message,
-            "--body", body,
-        ],
-        cwd=worktree_path,
+    active_provider = provider or provider_for(settings)
+    change = active_provider.create_change(
+        settings.target_repo,
+        ChangeRequestInput(
+            title=commit_message,
+            body=body,
+            branch=branch_name,
+            base_branch=settings.base_branch,
+        ),
     )
-    pr_url = pr_result.stdout.strip().splitlines()[-1]
+    pr_url = change.url
 
-    shell.run(
-        [
-            "gh", "issue", "close", str(task.issue_number),
-            "--repo", task.repo,
-            "--comment", f"Closed automatically by The Foundry after opening {pr_url}.",
-        ],
-        cwd=worktree_path,
+    active_provider.close_issue(
+        task.repo,
+        task.issue_number,
+        f"Closed automatically by The Foundry after opening {pr_url}.",
     )
 
     return {
@@ -67,6 +64,11 @@ def run(
         "touched_files": commit_result["touched_files"],
         "files_changed": commit_result["files_changed"],
     }
+
+
+def _fallback_issue_url(task: Task) -> str:
+    separator = "/-/issues/" if task.forge.value == "gitlab" else "/issues/"
+    return f"https://{task.forge_host}/{task.repo}{separator}{task.issue_number}"
 
 
 MAX_FILES_PER_PR = 40

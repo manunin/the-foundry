@@ -4,9 +4,10 @@ from pathlib import Path
 
 from langfuse import observe
 
-from .. import shell
-from ..config import Settings
-from ..models import Task
+from foundry import shell  # noqa: F401
+from foundry.config import Settings
+from foundry.forges import ForgeProvider, provider_for
+from foundry.models import Task
 
 
 @observe(name="stage.issue_comment")
@@ -16,23 +17,15 @@ def run(
     body: str,
     *,
     cwd: Path | None = None,
+    provider: ForgeProvider | None = None,
 ) -> dict:
-    """Ask for human input by commenting on the source GitHub issue."""
+    """Ask for human input by commenting on the source issue."""
     comment = body.strip()
     if not comment:
         comment = "The agent needs human input before it can continue."
 
-    shell.run(
-        [
-            "gh",
-            "issue",
-            "comment",
-            str(task.issue_number),
-            "--repo",
-            task.repo,
-            "--body",
-            comment,
-        ],
-        cwd=cwd,
+    del cwd
+    (provider or provider_for(settings)).comment_issue(
+        task.repo, task.issue_number, comment
     )
     return {"issue_number": task.issue_number, "comment": comment}

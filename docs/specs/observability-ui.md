@@ -27,6 +27,15 @@ replay'ить хвост после reconnect через `Last-Event-ID`.
 
 ## Backend API
 
+Проекция задачи сохраняет совместимое поле `pr_url` и дополнительно отдаёт
+`forge`, `forge_host`, `issue_url` и `change_kind` (`PR` или `MR`). UI использует
+готовый `issue_url` и не конструирует provider-specific ссылки. Событие
+change-request feedback содержит компактные `forge`, `change_number`,
+`change_url` и `feedback_fingerprint`; полные ответы forge API не сохраняются.
+При возобновлении blocked-задачи событие `human_clarification_received`
+содержит только external comment IDs и authors; текст ответа поступает в task
+context, но полный forge API response в event log не записывается.
+
 FastAPI живёт в `src/api/`.
 
 | Endpoint | Назначение |

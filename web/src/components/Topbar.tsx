@@ -54,7 +54,7 @@ export default function Topbar({
         className="topbar-btn"
         onClick={handlePull}
         disabled={pulling}
-        title="Подтянуть задачи из GitHub"
+        title="Pull issues from the configured forge"
         style={{ minWidth: 90 }}
       >
         <RefreshCw style={{ animation: pulling ? "spinner .8s linear infinite" : undefined }} />
