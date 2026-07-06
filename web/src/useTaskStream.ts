@@ -28,6 +28,9 @@ const SSE_EVENT_KINDS = [
   "agent_text",
   "agent_thinking",
   "agent_result",
+  "agent_span_started",
+  "agent_span_finished",
+  "agent_span_failed",
 ] as const;
 
 const EMPTY_EVENTS: UiEvent[] = [];

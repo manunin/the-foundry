@@ -18,7 +18,7 @@ interface Props {
   events: UiEvent[];
 }
 
-const AGENT_STAGES = new Set(["agent_plan", "agent_implement"]);
+const AGENT_STAGES = new Set(["agent_plan", "agent_implement", "verify"]);
 
 type TabId = "input" | "stream" | "output";
 
@@ -207,6 +207,54 @@ export default function StageDetailPanel({ task, stageId, events }: Props): JSX.
           )}
         </div>
       </div>
+
+      {stage.trace && (
+        <div
+          className="tabular"
+          style={{
+            padding: "8px 18px",
+            borderBottom: "1px solid var(--border)",
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "6px 16px",
+            color: "var(--fg-2)",
+            fontSize: 11,
+          }}
+        >
+          <span>agent {formatDurationMs(stage.trace.run_duration_ms)}</span>
+          <span>
+            tools {stage.trace.tool_count} /{" "}
+            {formatDurationMs(stage.trace.tool_duration_ms)}
+          </span>
+          <span>turns {formatDurationMs(stage.trace.turn_duration_ms)}</span>
+          {stage.trace.time_to_first_event_ms != null && (
+            <span>
+              first event {formatDurationMs(stage.trace.time_to_first_event_ms)}
+            </span>
+          )}
+          {stage.trace.time_to_first_text_ms != null && (
+            <span>
+              first text {formatDurationMs(stage.trace.time_to_first_text_ms)}
+            </span>
+          )}
+          {stage.trace.retry_count > 0 && (
+            <span>
+              retries {stage.trace.retry_count} / backoff{" "}
+              {formatDurationMs(stage.trace.backoff_duration_ms)}
+            </span>
+          )}
+          {stage.trace.unattributed_duration_ms > 0 && (
+            <span>
+              overhead {formatDurationMs(stage.trace.unattributed_duration_ms)}
+            </span>
+          )}
+          {stage.trace.slowest_tools.slice(0, 3).map((tool, index) => (
+            <span key={`${tool.name}-${index}`}>
+              slow {tool.name} {formatDurationMs(tool.duration_ms)}
+            </span>
+          ))}
+        </div>
+      )}
 
       {/* Tab bar */}
       <div className="stage-tabbar">

@@ -137,3 +137,58 @@ def test_project_task_status_pending_when_no_events() -> None:
     assert ui.status == "pending"
     assert ui.stages == {}
     assert ui.total_cost_usd == 0.0
+
+
+def test_project_task_aggregates_agent_trace_timings() -> None:
+    task = _task()
+    events = [
+        _ev(1, "implement", "stage_started", {}),
+        _ev(
+            2,
+            "implement",
+            "agent_span_finished",
+            {
+                "span_type": "attempt",
+                "name": "attempt 2",
+                "attempt": 2,
+                "duration_ms": 80,
+                "time_to_first_event_ms": 12,
+            },
+        ),
+        _ev(
+            3,
+            "implement",
+            "agent_span_finished",
+            {"span_type": "tool", "name": "Bash", "duration_ms": 30},
+        ),
+        _ev(
+            4,
+            "implement",
+            "agent_span_finished",
+            {"span_type": "backoff", "name": "backoff", "duration_ms": 20},
+        ),
+        _ev(
+            5,
+            "implement",
+            "agent_span_finished",
+            {
+                "span_type": "run",
+                "name": "codex_cli",
+                "duration_ms": 105,
+                "time_to_first_text_ms": 25,
+            },
+        ),
+        _ev(6, "implement", "stage_finished", {"duration_ms": 110}),
+    ]
+
+    trace = project_task(task, events).stages["agent_implement"].trace
+
+    assert trace is not None
+    assert trace.run_duration_ms == 105
+    assert trace.tool_duration_ms == 30
+    assert trace.backoff_duration_ms == 20
+    assert trace.unattributed_duration_ms == 5
+    assert trace.retry_count == 1
+    assert trace.time_to_first_event_ms == 12
+    assert trace.time_to_first_text_ms == 25
+    assert trace.slowest_tools[0].name == "Bash"

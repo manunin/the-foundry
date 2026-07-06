@@ -23,6 +23,27 @@ def alias_stage(internal: str) -> str:
 StageStatus = Literal["pending", "running", "done", "failed"]
 
 
+class UiToolTiming(BaseModel):
+    name: str
+    duration_ms: int
+    status: str
+
+
+class UiTraceSummary(BaseModel):
+    run_duration_ms: int = 0
+    attempt_duration_ms: int = 0
+    turn_duration_ms: int = 0
+    tool_duration_ms: int = 0
+    backoff_duration_ms: int = 0
+    unattributed_duration_ms: int = 0
+    time_to_first_event_ms: int | None = None
+    time_to_first_text_ms: int | None = None
+    tool_count: int = 0
+    retry_count: int = 0
+    failed_span_count: int = 0
+    slowest_tools: list[UiToolTiming] = Field(default_factory=list)
+
+
 class UiStage(BaseModel):
     name: str
     status: StageStatus
@@ -34,6 +55,7 @@ class UiStage(BaseModel):
     input: dict[str, Any] | None = None
     output: dict[str, Any] | None = None
     error: str | None = None
+    trace: UiTraceSummary | None = None
 
 
 class UiEvent(BaseModel):
@@ -92,6 +114,7 @@ def project_task(
     tokens_out_total = 0
     duration_ms_total = 0
     running_started_ts_ms: dict[str, int] = {}
+    trace_summaries: dict[str, UiTraceSummary] = {}
 
     for ev in events:
         aliased = alias_stage(ev.stage)
@@ -133,6 +156,22 @@ def project_task(
                 st.duration_ms = payload.get("duration_ms")
             stages[aliased] = st
             running_started_ts_ms.pop(aliased, None)
+        elif ev.kind in {"agent_span_finished", "agent_span_failed"}:
+            summary = trace_summaries.setdefault(aliased, UiTraceSummary())
+            _fold_trace_span(summary, payload, failed=ev.kind == "agent_span_failed")
+
+    for stage_name, summary in trace_summaries.items():
+        summary.unattributed_duration_ms = max(
+            0,
+            summary.run_duration_ms
+            - summary.attempt_duration_ms
+            - summary.backoff_duration_ms,
+        )
+        summary.slowest_tools.sort(key=lambda item: item.duration_ms, reverse=True)
+        summary.slowest_tools = summary.slowest_tools[:5]
+        stage = stages.get(stage_name)
+        if stage is not None:
+            stage.trace = summary
 
     if running_started_ts_ms:
         now_ms = int(time.time() * 1000)
@@ -178,3 +217,45 @@ def project_task(
         memory=[UiMemoryEntry(**entry) for entry in (memory or [])],
         events=ui_events,
     )
+
+
+def _fold_trace_span(
+    summary: UiTraceSummary,
+    payload: dict[str, Any],
+    *,
+    failed: bool,
+) -> None:
+    span_type = payload.get("span_type")
+    duration_ms = payload.get("duration_ms")
+    duration = duration_ms if isinstance(duration_ms, int) else 0
+    if failed:
+        summary.failed_span_count += 1
+
+    if span_type == "run":
+        summary.run_duration_ms += duration
+        first_text = payload.get("time_to_first_text_ms")
+        if summary.time_to_first_text_ms is None and isinstance(first_text, int):
+            summary.time_to_first_text_ms = first_text
+    elif span_type == "attempt":
+        summary.attempt_duration_ms += duration
+        attempt = payload.get("attempt")
+        if isinstance(attempt, int):
+            summary.retry_count = max(summary.retry_count, attempt - 1)
+        first_event = payload.get("time_to_first_event_ms")
+        if summary.time_to_first_event_ms is None and isinstance(first_event, int):
+            summary.time_to_first_event_ms = first_event
+    elif span_type == "turn":
+        summary.turn_duration_ms += duration
+    elif span_type == "tool":
+        summary.tool_count += 1
+        summary.tool_duration_ms += duration
+        if isinstance(duration_ms, int):
+            summary.slowest_tools.append(
+                UiToolTiming(
+                    name=str(payload.get("name") or "tool"),
+                    duration_ms=duration_ms,
+                    status=str(payload.get("status") or "unknown"),
+                )
+            )
+    elif span_type == "backoff":
+        summary.backoff_duration_ms += duration

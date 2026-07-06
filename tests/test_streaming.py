@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import io
-from typing import Any
+import subprocess
+from typing import Any, Callable
 
 import pytest
 
@@ -9,7 +10,9 @@ from foundry.agents.streaming import (
     CliProcessError,
     _normalize_tool_event,
     iter_cli_jsonl,
+    iter_cli_jsonl_with_retry,
 )
+from foundry.agents.tracing import StreamLifecycleKind
 
 
 class _FakePopen:
@@ -23,6 +26,9 @@ class _FakePopen:
     # subprocess.Popen-compatible surface used by iter_cli_jsonl.
     def wait(self) -> int:
         return self._returncode
+
+    def kill(self) -> None:
+        self._returncode = -9
 
 
 def _install_fake_popen(monkeypatch: pytest.MonkeyPatch, popen_obj: _FakePopen) -> None:
@@ -77,6 +83,24 @@ def test_iter_cli_jsonl_raises_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch) 
 
     assert exc.value.returncode == 1
     assert exc.value.stderr == "boom"
+
+
+def test_iter_cli_jsonl_enforces_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    class ImmediateTimer:
+        def __init__(self, _delay: int, callback: Callable[[], None]) -> None:
+            self._callback = callback
+
+        def start(self) -> None:
+            self._callback()
+
+        def cancel(self) -> None:
+            pass
+
+    _install_fake_popen(monkeypatch, _FakePopen([]))
+    monkeypatch.setattr("foundry.agents.streaming.threading.Timer", ImmediateTimer)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        list(iter_cli_jsonl(["fake"], timeout_sec=1))
 
 
 def test_normalize_tool_event_read_uses_file_path() -> None:
@@ -139,3 +163,36 @@ def test_normalize_tool_event_missing_input_is_safe() -> None:
     assert out["tool"] == "Read"
     assert out["detail"] is None
     assert out["args"] is None
+
+
+def test_stream_retry_emits_attempt_and_backoff_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def fake_iter(*_args: Any, **_kwargs: Any):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise CliProcessError(["fake"], 1, "429 rate limit")
+        yield {"type": "result"}
+
+    lifecycle = []
+    monkeypatch.setattr("foundry.agents.streaming.iter_cli_jsonl", fake_iter)
+    monkeypatch.setattr("foundry.agents.streaming._RETRY_DELAYS", (1,))
+    monkeypatch.setattr("foundry.agents.streaming.time.sleep", lambda _delay: None)
+
+    result = iter_cli_jsonl_with_retry(
+        ["fake"],
+        on_lifecycle=lifecycle.append,
+    )
+
+    assert result == [{"type": "result"}]
+    assert [event.kind for event in lifecycle] == [
+        StreamLifecycleKind.ATTEMPT_STARTED,
+        StreamLifecycleKind.ATTEMPT_FAILED,
+        StreamLifecycleKind.BACKOFF_STARTED,
+        StreamLifecycleKind.BACKOFF_FINISHED,
+        StreamLifecycleKind.ATTEMPT_STARTED,
+        StreamLifecycleKind.ATTEMPT_FINISHED,
+    ]

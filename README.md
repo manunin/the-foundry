@@ -194,7 +194,9 @@ AGENT_IMPLEMENT_MAX_TURNS=40
 
 Аутентификация и формат идентификатора модели — на стороне `opencode` CLI; foundry-бэкенд только пробрасывает `-m <model>` и `--session <id>` для resume. Поэтому смену провайдера (DeepSeek → OpenAI → локальный Ollama → …) делаешь правкой `auth.json` + `AGENT_MODEL`, без изменений в коде.
 
-> **Важно про observability:** в отличие от `claude_cli`, бэкенд `opencode_cli` пока не стримит инкрементальные `agent_tool` / `agent_text` события в `task_events` — UI увидит только финальный `stage_finished` (см. TODO в [src/foundry/agents/opencode_cli.py](src/foundry/agents/opencode_cli.py)).
+> **Observability:** `claude_cli`, `codex_cli` и `opencode_cli` стримят
+> нормализованные agent events и timing spans в `task_events`. Детализация
+> tool/turn зависит от событий, которые предоставляет конкретная версия CLI.
 
 ---
 

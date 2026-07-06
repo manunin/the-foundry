@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
 import structlog
+
+from foundry.agents.tracing import (
+    StreamLifecycleEvent,
+    StreamLifecycleKind,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -69,6 +75,8 @@ def iter_cli_jsonl_with_retry(
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    on_lifecycle: Callable[[StreamLifecycleEvent], None] | None = None,
+    timeout_sec: int | None = None,
 ) -> list[dict[str, Any]]:
     """Run a streaming CLI command with rate-limit retry.
 
@@ -85,6 +93,15 @@ def iter_cli_jsonl_with_retry(
         [0] + list(_RETRY_DELAYS), start=1
     ):
         if delay:
+            _notify_lifecycle(
+                on_lifecycle,
+                StreamLifecycleEvent(
+                    kind=StreamLifecycleKind.BACKOFF_STARTED,
+                    attempt=attempt,
+                    delay_ms=delay * 1000,
+                ),
+            )
+            backoff_started_ns = time.monotonic_ns()
             log.warning(
                 "streaming.rate_limit_retry",
                 attempt=attempt,
@@ -92,19 +109,79 @@ def iter_cli_jsonl_with_retry(
                 cmd=cmd[0] if cmd else "",
             )
             time.sleep(delay)
+            _notify_lifecycle(
+                on_lifecycle,
+                StreamLifecycleEvent(
+                    kind=StreamLifecycleKind.BACKOFF_FINISHED,
+                    attempt=attempt,
+                    duration_ms=(
+                        time.monotonic_ns() - backoff_started_ns
+                    ) // 1_000_000,
+                    delay_ms=delay * 1000,
+                ),
+            )
+        attempt_started_ns = time.monotonic_ns()
+        _notify_lifecycle(
+            on_lifecycle,
+            StreamLifecycleEvent(
+                kind=StreamLifecycleKind.ATTEMPT_STARTED,
+                attempt=attempt,
+            ),
+        )
         try:
             collected: list[dict[str, Any]] = []
-            for ev in iter_cli_jsonl(cmd, cwd=cwd, env=env):
+            first_event_ms: int | None = None
+            for ev in iter_cli_jsonl(
+                cmd,
+                cwd=cwd,
+                env=env,
+                timeout_sec=timeout_sec,
+            ):
+                if first_event_ms is None:
+                    first_event_ms = (
+                        time.monotonic_ns() - attempt_started_ns
+                    ) // 1_000_000
                 if on_event is not None:
                     on_event(ev)
                 collected.append(ev)
+            _notify_lifecycle(
+                on_lifecycle,
+                StreamLifecycleEvent(
+                    kind=StreamLifecycleKind.ATTEMPT_FINISHED,
+                    attempt=attempt,
+                    duration_ms=(
+                        time.monotonic_ns() - attempt_started_ns
+                    ) // 1_000_000,
+                    event_count=len(collected),
+                    time_to_first_event_ms=first_event_ms,
+                ),
+            )
             return collected
-        except CliProcessError as exc:
-            if _is_rate_limit_error(exc):
+        except (CliProcessError, subprocess.TimeoutExpired) as exc:
+            _notify_lifecycle(
+                on_lifecycle,
+                StreamLifecycleEvent(
+                    kind=StreamLifecycleKind.ATTEMPT_FAILED,
+                    attempt=attempt,
+                    duration_ms=(
+                        time.monotonic_ns() - attempt_started_ns
+                    ) // 1_000_000,
+                    error=str(exc),
+                ),
+            )
+            if isinstance(exc, CliProcessError) and _is_rate_limit_error(exc):
                 last_err = exc
                 continue
             raise
     raise last_err  # type: ignore[misc]
+
+
+def _notify_lifecycle(
+    callback: Callable[[StreamLifecycleEvent], None] | None,
+    event: StreamLifecycleEvent,
+) -> None:
+    if callback is not None:
+        callback(event)
 
 
 def iter_cli_jsonl(
@@ -112,6 +189,7 @@ def iter_cli_jsonl(
     *,
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
+    timeout_sec: int | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Stream newline-delimited JSON events from a subprocess stdout.
 
@@ -133,6 +211,19 @@ def iter_cli_jsonl(
         text=True,
         bufsize=1,  # line-buffered
     )
+    timed_out = threading.Event()
+
+    def kill_on_timeout() -> None:
+        timed_out.set()
+        proc.kill()
+
+    timer = (
+        threading.Timer(timeout_sec, kill_on_timeout)
+        if timeout_sec is not None
+        else None
+    )
+    if timer is not None:
+        timer.start()
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -149,6 +240,8 @@ def iter_cli_jsonl(
                 )
                 continue
     finally:
+        if timer is not None:
+            timer.cancel()
         # Ensure process is reaped and stderr is drained no matter how the
         # iterator is closed (normal exhaust, GeneratorExit, exception).
         returncode = proc.wait()
@@ -169,6 +262,8 @@ def iter_cli_jsonl(
             proc.stdout.close()
         if proc.stderr is not None:
             proc.stderr.close()
+        if timed_out.is_set():
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout_sec)
         if returncode != 0:
             raise CliProcessError(cmd, returncode, stderr_text)
 

@@ -6,6 +6,7 @@ from unittest.mock import patch
 from foundry import state
 from foundry.agents import AgentSettings, AgentStage, AgentTask
 from foundry.agents.opencode_cli import OpencodeCliAgent
+from foundry.events import read_events
 
 
 def _task(task_id: int = 1) -> AgentTask:
@@ -70,7 +71,7 @@ def test_apply_caches_session_id_and_resumes_next_call(tmp_path: Path) -> None:
     ]
     resume = [{"type": "text", "sessionID": "ses_11", "part": {"text": "again"}}]
 
-    with patch("foundry.agents.opencode_cli.run_cli_jsonl") as run:
+    with patch("foundry.agents.opencode_cli.iter_cli_jsonl_with_retry") as run:
         run.side_effect = [fresh, resume]
         first = agent.apply(task=task, worktree=tmp_path, input="hi")
         second = agent.apply(task=task, worktree=tmp_path, input="more")
@@ -92,7 +93,7 @@ def test_apply_resumes_session_id_from_sqlite(tmp_path: Path) -> None:
     first_agent = OpencodeCliAgent(settings=settings)
 
     with patch(
-        "foundry.agents.opencode_cli.run_cli_jsonl",
+        "foundry.agents.opencode_cli.iter_cli_jsonl_with_retry",
         return_value=[
             {"type": "step_start", "sessionID": "ses_db"},
             {"type": "text", "sessionID": "ses_db", "part": {"text": "done"}},
@@ -102,7 +103,7 @@ def test_apply_resumes_session_id_from_sqlite(tmp_path: Path) -> None:
 
     second_agent = OpencodeCliAgent(settings=settings)
     with patch(
-        "foundry.agents.opencode_cli.run_cli_jsonl",
+        "foundry.agents.opencode_cli.iter_cli_jsonl_with_retry",
         return_value=[
             {"type": "text", "sessionID": "ses_db", "part": {"text": "again"}}
         ],
@@ -117,7 +118,7 @@ def test_apply_passes_model_dir_and_format(tmp_path: Path) -> None:
     agent = OpencodeCliAgent(settings=_settings(model="openrouter/x-ai/grok"))
 
     with patch(
-        "foundry.agents.opencode_cli.run_cli_jsonl",
+        "foundry.agents.opencode_cli.iter_cli_jsonl_with_retry",
         return_value=[{"type": "text", "sessionID": "s", "part": {"text": "ok"}}],
     ) as run:
         agent.apply(task=_task(), worktree=tmp_path, input="")
@@ -165,3 +166,51 @@ def test_extract_usage_returns_none_when_missing() -> None:
     events = [{"type": "text", "part": {"text": "hi"}}]
 
     assert OpencodeCliAgent._extract_usage(events) is None
+
+
+def test_opencode_streams_text_tool_and_trace_events(tmp_path: Path) -> None:
+    db = tmp_path / "foundry.sqlite"
+    state.init_db(db)
+    agent = OpencodeCliAgent(settings=_settings(db_path=db))
+    task = _task(task_id=14)
+    streamed = [
+        {"type": "step_start", "id": "step-1", "sessionID": "ses_14"},
+        {
+            "type": "tool",
+            "part": {
+                "id": "tool-1",
+                "tool": "Bash",
+                "state": {"status": "running", "input": {"command": "pytest"}},
+            },
+        },
+        {
+            "type": "tool",
+            "part": {
+                "id": "tool-1",
+                "tool": "Bash",
+                "state": {"status": "completed", "input": {"command": "pytest"}},
+            },
+        },
+        {"type": "text", "part": {"text": "done"}},
+        {"type": "step_finish", "id": "step-1"},
+    ]
+
+    def stream(*_args: object, **kwargs: object) -> list[dict]:
+        on_event = kwargs.get("on_event")
+        if callable(on_event):
+            for event in streamed:
+                on_event(event)
+        return streamed
+
+    with patch(
+        "foundry.agents.opencode_cli.iter_cli_jsonl_with_retry",
+        side_effect=stream,
+    ):
+        result = agent.apply(task=task, worktree=tmp_path)
+
+    assert result.response == "done"
+    kinds = [event.kind for event in read_events(db, task_id=task.id)]
+    assert "agent_tool" in kinds
+    assert "agent_text" in kinds
+    assert "agent_result" in kinds
+    assert "agent_span_finished" in kinds

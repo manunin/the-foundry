@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from collections import Counter
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 
 from foundry import state
 from foundry.config import ConfigError, load_settings
 from foundry.events import read_events
 from foundry.models import Stage, TaskStatus
 
-from .projections import UiMemoryEntry, UiTask, project_task
+from .projections import UiEvent, UiMemoryEntry, UiTask, alias_stage, project_task
 from .sse import router as sse_router
 
 app = FastAPI(title="The Foundry API")
@@ -58,6 +58,33 @@ async def get_task(task_id: int) -> UiTask:
     return project_task(
         task, events, include_events=True, events_limit=200, memory=memory
     )
+
+
+@app.get("/api/tasks/{task_id}/event-history", response_model=list[UiEvent])
+async def get_task_event_history(
+    task_id: int,
+    before_seq: int | None = None,
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> list[UiEvent]:
+    """Return the latest page before a sequence boundary, in chronological order."""
+    settings = _settings_or_raise()
+    state.init_db(settings.db_path)
+    if state.get_task(settings.db_path, task_id) is None:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+    events = read_events(settings.db_path, task_id)
+    if before_seq is not None:
+        events = [event for event in events if event.seq < before_seq]
+    return [
+        UiEvent(
+            seq=event.seq,
+            stage=alias_stage(event.stage),
+            kind=event.kind,
+            ts_ms=event.ts_ms,
+            payload=event.payload,
+        )
+        for event in events[-limit:]
+    ]
 
 
 @app.post("/api/tasks/{task_id}/reset", response_model=UiTask)

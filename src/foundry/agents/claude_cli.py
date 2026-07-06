@@ -15,6 +15,7 @@ from .base import (
 )
 from .config import AgentSettings
 from .streaming import _normalize_tool_event, iter_cli_jsonl_with_retry
+from .tracing import AgentTracer, SpanType
 
 
 class ClaudeCliAgent:
@@ -68,46 +69,56 @@ class ClaudeCliAgent:
         if resume_id:
             cmd += ["--resume", resume_id]
 
-        with observability.track_generation(
-            name="llm.claude_cli",
+        tracer = AgentTracer(
+            db_path=self._settings.db_path,
+            task_id=task.id,
+            stage=self.stage.value,
+            backend=self.name,
             model=self._settings.model or None,
-            input=prompt,
-        ) as gen:
-            events = iter_cli_jsonl_with_retry(
-                cmd,
-                cwd=worktree,
-                env=scrubbed_agent_env(self.name),
-                on_event=lambda ev: self._emit_for(task, ev),
-            )
+        )
+        with tracer.run():
+            with observability.track_generation(
+                name="llm.claude_cli",
+                model=self._settings.model or None,
+                input=prompt,
+            ) as gen:
+                events = iter_cli_jsonl_with_retry(
+                    cmd,
+                    cwd=worktree,
+                    env=scrubbed_agent_env(self.name),
+                    on_event=lambda ev: self._emit_for(task, ev, tracer),
+                    on_lifecycle=tracer.handle_stream_lifecycle,
+                    timeout_sec=self._settings.timeout_sec,
+                )
 
-            new_session_id = self._extract_session_id(events)
-            if new_session_id:
-                self._sessions[task.id] = new_session_id
-                if self._settings.db_path is not None:
-                    state.save_agent_session(
-                        self._settings.db_path,
-                        task.id,
-                        self.stage.value,
-                        self.name,
-                        new_session_id,
-                    )
+                new_session_id = self._extract_session_id(events)
+                if new_session_id:
+                    self._sessions[task.id] = new_session_id
+                    if self._settings.db_path is not None:
+                        state.save_agent_session(
+                            self._settings.db_path,
+                            task.id,
+                            self.stage.value,
+                            self.name,
+                            new_session_id,
+                        )
 
-            response = self._extract_final_text(events)
-            usage = self._extract_usage(events)
-            cost_usd = self._extract_cost_usd(events)
-            actual_model = self._extract_model(events) or self._settings.model or None
-            observability.update_generation(
-                gen, output=response, usage=usage, model=actual_model
-            )
+                response = self._extract_final_text(events)
+                usage = self._extract_usage(events)
+                cost_usd = self._extract_cost_usd(events)
+                actual_model = self._extract_model(events) or self._settings.model or None
+                observability.update_generation(
+                    gen, output=response, usage=usage, model=actual_model
+                )
 
             # Final agent_result breadcrumb — summary (first line) for a
             # compact row in the event stream, and `text` (full response) so
             # the UI can render a collapsible "show full answer" block.
-            self._record(
-                task,
-                kind="agent_result",
-                payload={"summary": first_line(response), "text": response},
-            )
+                self._record(
+                    task,
+                    kind="agent_result",
+                    payload={"summary": first_line(response), "text": response},
+                )
 
         return AgentResult(
             stage=self.stage,
@@ -130,10 +141,15 @@ class ClaudeCliAgent:
             self._sessions[task.id] = session_id
         return session_id
 
-    def _emit_for(self, task: AgentTask, event: dict[str, Any]) -> None:
+    def _emit_for(
+        self,
+        task: AgentTask,
+        event: dict[str, Any],
+        tracer: AgentTracer,
+    ) -> None:
         """Translate one streamed CLI event into `task_events` rows."""
         etype = event.get("type")
-        if etype != "assistant":
+        if etype not in {"assistant", "user"}:
             return
         message = event.get("message") or {}
         content = message.get("content") or []
@@ -144,10 +160,27 @@ class ClaudeCliAgent:
                 continue
             btype = block.get("type")
             if btype == "tool_use":
+                tool_id = str(block.get("id") or f"tool:{block.get('name', 'tool')}")
+                tracer.start_provider_span(
+                    tool_id,
+                    SpanType.TOOL,
+                    str(block.get("name") or "tool"),
+                )
                 self._record(task, kind="agent_tool", payload=_normalize_tool_event(block))
+            elif btype == "tool_result":
+                tool_id = str(
+                    block.get("tool_use_id") or block.get("id") or "tool:unknown"
+                )
+                tracer.finish_provider_span(
+                    tool_id,
+                    SpanType.TOOL,
+                    str(block.get("name") or "tool"),
+                    status="failed" if block.get("is_error") else "success",
+                )
             elif btype == "text":
                 text = block.get("text")
                 if text:
+                    tracer.mark_first_text()
                     self._record(task, kind="agent_text", payload={"text": str(text)})
             elif btype == "thinking":
                 # Claude CLI historically used `thinking` but some versions

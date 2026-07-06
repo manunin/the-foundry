@@ -21,6 +21,28 @@ export interface UiStage {
   input?: Record<string, unknown> | null;
   output?: Record<string, unknown> | null;
   error?: string | null;
+  trace?: UiTraceSummary | null;
+}
+
+export interface UiToolTiming {
+  name: string;
+  duration_ms: number;
+  status: string;
+}
+
+export interface UiTraceSummary {
+  run_duration_ms: number;
+  attempt_duration_ms: number;
+  turn_duration_ms: number;
+  tool_duration_ms: number;
+  backoff_duration_ms: number;
+  unattributed_duration_ms: number;
+  time_to_first_event_ms?: number | null;
+  time_to_first_text_ms?: number | null;
+  tool_count: number;
+  retry_count: number;
+  failed_span_count: number;
+  slowest_tools: UiToolTiming[];
 }
 
 export interface UiEvent {
@@ -90,6 +112,18 @@ export function fetchTasks(): Promise<UiTask[]> {
 
 export function fetchTask(id: number): Promise<UiTask> {
   return getJson<UiTask>(`/api/tasks/${id}`);
+}
+
+export function fetchTaskEventHistory(
+  id: number,
+  beforeSeq?: number,
+  limit = 200,
+): Promise<UiEvent[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (beforeSeq !== undefined) {
+    params.set("before_seq", String(beforeSeq));
+  }
+  return getJson<UiEvent[]>(`/api/tasks/${id}/event-history?${params.toString()}`);
 }
 
 export function fetchRepos(): Promise<RepoCount[]> {

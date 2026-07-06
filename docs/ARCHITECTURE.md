@@ -214,7 +214,13 @@ uv run foundry pr-feedback         # continuous polling по открытым PR
 
 ### Q7: Мониторинг
 
-**Append-only event log** (таблица `task_events`): каждая стадия записывает `stage_started` / `stage_finished` с `duration_ms`, `cost_usd`, `tokens_in`, `tokens_out`. Агентские события (`agent_thinking`, `agent_tool`, `agent_text`, `agent_result`) стримятся в реальном времени. Код: `events.py`.
+**Append-only event log** (таблица `task_events`): каждая стадия записывает
+`stage_started` / `stage_finished` с `duration_ms`, `cost_usd`, `tokens_in`,
+`tokens_out`. Агентские события (`agent_thinking`, `agent_tool`, `agent_text`,
+`agent_result`) стримятся в реальном времени. Correlated timing spans
+(`agent_span_started` / `agent_span_finished` / `agent_span_failed`) измеряют
+run, retry attempts, backoff, turns и tools через monotonic clock. Код:
+`events.py`, `agents/tracing.py`.
 
 **Структурированные логи**: `structlog` с полями `task_id`, `stage`, `error`. Формат JSON в проде.
 
@@ -224,7 +230,10 @@ uv run foundry pr-feedback         # continuous polling по открытым PR
 
 **API endpoints**: `GET /api/repos/{repo}/memory` — память репозитория. `GET /api/tasks/{id}` — последние 200 событий задачи.
 
-**Восстановление хода агента**: event log содержит все `agent_tool` события (имя инструмента, входные/выходные данные), поэтому полная история действий агента восстанавливаема из БД.
+**Восстановление хода агента**: event log содержит нормализованные
+`agent_tool` события и provider timing spans. Полнота tool/turn истории зависит
+от NDJSON-контракта и версии выбранного CLI; отсутствующие start events не
+получают искусственную длительность.
 
 ---
 

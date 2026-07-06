@@ -18,6 +18,9 @@ legacy-дневником для совместимости и быстрых о
 - `agent_thinking`
 - `agent_text`
 - `agent_result`
+- `agent_span_started`
+- `agent_span_finished`
+- `agent_span_failed`
 
 События имеют монотонный `seq` внутри `task_id`, поэтому SSE может безопасно
 replay'ить хвост после reconnect через `Last-Event-ID`.
@@ -69,6 +72,16 @@ UI получает список задач через polling (`GET /api/tasks`
 `src/foundry/agents/streaming.py`: `Read` показывает путь, `Bash` — description
 или command, `Grep` — pattern, неизвестные инструменты показываются безопасно
 без обязательного `detail`.
+
+Timing spans образуют иерархию `run → attempt → turn/tool`; rate-limit backoff
+записывается отдельным span. Длительности считаются через monotonic clock,
+а `ts_ms` остаётся wall-clock временем события. Если backend прислал только
+завершение tool event, `duration_ms` остаётся `null`, чтобы не создавать
+ложную точность.
+
+Полная история доступна страницами через
+`GET /api/tasks/{id}/event-history?before_seq=<seq>&limit=<n>`. Обычный task
+detail по-прежнему возвращает последние 200 events.
 
 ## Открытые Следующие Шаги
 

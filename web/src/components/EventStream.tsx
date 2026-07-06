@@ -6,6 +6,7 @@ import type { JSX } from "react";
 import { useEffect, useRef, useState } from "react";
 
 import type { UiEvent } from "../api";
+import { formatDurationMs } from "../utils";
 
 interface Props {
   events: UiEvent[];
@@ -125,6 +126,43 @@ function AgentResultRow({ event }: { event: UiEvent }): JSX.Element {
 
 function renderEvent(event: UiEvent): JSX.Element | null {
   const payload = event.payload ?? {};
+
+  if (
+    event.kind === "agent_span_started" ||
+    event.kind === "agent_span_finished" ||
+    event.kind === "agent_span_failed"
+  ) {
+    const spanType = getString(payload, "span_type") || "span";
+    const name = getString(payload, "name") || spanType;
+    const duration = payload.duration_ms;
+    const durationLabel =
+      typeof duration === "number" ? formatDurationMs(duration) : "";
+    const icon =
+      event.kind === "agent_span_started"
+        ? "▶"
+        : event.kind === "agent_span_failed"
+          ? "✕"
+          : "✓";
+    return (
+      <div className="event-row" key={event.seq}>
+        <span className="event-ico">{icon}</span>
+        <div style={{ flex: 1, minWidth: 0, display: "flex", gap: 6 }}>
+          <span className="mono" style={{ color: "var(--fg-3)", fontSize: 11 }}>
+            {spanType}
+          </span>
+          <span className="ellipsis" style={{ color: "var(--fg-1)", fontSize: 11.5 }}>
+            {name}
+          </span>
+          {durationLabel && (
+            <span className="mono" style={{ color: "var(--fg-2)", fontSize: 11 }}>
+              {durationLabel}
+            </span>
+          )}
+        </div>
+        <span className="event-ts mono">{fmtTs(event.ts_ms)}</span>
+      </div>
+    );
+  }
 
   if (event.kind === "agent_tool") {
     const tool = getString(payload, "tool") || "tool";

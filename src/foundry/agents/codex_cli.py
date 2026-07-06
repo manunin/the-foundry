@@ -16,6 +16,7 @@ from .base import (
 )
 from .config import AgentSettings
 from .streaming import _normalize_tool_event, iter_cli_jsonl_with_retry
+from .tracing import AgentTracer, SpanType
 
 
 class CodexCliAgent:
@@ -54,39 +55,49 @@ class CodexCliAgent:
             prompt = input
             cmd = self._resume_cmd(resume_id, prompt)
 
-        with observability.track_generation(
-            name="llm.codex_cli",
+        tracer = AgentTracer(
+            db_path=self._settings.db_path,
+            task_id=task.id,
+            stage=self.stage.value,
+            backend=self.name,
             model=self._settings.model or None,
-            input=prompt,
-        ) as gen:
-            events = iter_cli_jsonl_with_retry(
-                cmd,
-                cwd=worktree,
-                env=scrubbed_agent_env(self.name),
-                on_event=lambda ev: self._emit_for(task, ev),
-            )
+        )
+        with tracer.run():
+            with observability.track_generation(
+                name="llm.codex_cli",
+                model=self._settings.model or None,
+                input=prompt,
+            ) as gen:
+                events = iter_cli_jsonl_with_retry(
+                    cmd,
+                    cwd=worktree,
+                    env=scrubbed_agent_env(self.name),
+                    on_event=lambda ev: self._emit_for(task, ev, tracer),
+                    on_lifecycle=tracer.handle_stream_lifecycle,
+                    timeout_sec=self._settings.timeout_sec,
+                )
 
-            new_session_id = self._extract_session_id(events)
-            if new_session_id:
-                self._sessions[task.id] = new_session_id
-                if self._settings.db_path is not None:
-                    state.save_agent_session(
-                        self._settings.db_path,
-                        task.id,
-                        self.stage.value,
-                        self.name,
-                        new_session_id,
-                    )
+                new_session_id = self._extract_session_id(events)
+                if new_session_id:
+                    self._sessions[task.id] = new_session_id
+                    if self._settings.db_path is not None:
+                        state.save_agent_session(
+                            self._settings.db_path,
+                            task.id,
+                            self.stage.value,
+                            self.name,
+                            new_session_id,
+                        )
 
-            response = self._extract_final_text(events)
-            usage = self._extract_usage(events)
-            observability.update_generation(gen, output=response, usage=usage)
+                response = self._extract_final_text(events)
+                usage = self._extract_usage(events)
+                observability.update_generation(gen, output=response, usage=usage)
 
-            self._record(
-                task,
-                kind="agent_result",
-                payload={"summary": first_line(response), "text": response},
-            )
+                self._record(
+                    task,
+                    kind="agent_result",
+                    payload={"summary": first_line(response), "text": response},
+                )
 
         return AgentResult(
             stage=self.stage,
@@ -145,18 +156,48 @@ class CodexCliAgent:
             prompt,
         ]
 
-    def _emit_for(self, task: AgentTask, event: dict[str, Any]) -> None:
+    def _emit_for(
+        self,
+        task: AgentTask,
+        event: dict[str, Any],
+        tracer: AgentTracer,
+    ) -> None:
         """Translate one streamed Codex CLI event into `task_events` rows."""
-        if event.get("type") != "item.completed":
+        event_type = event.get("type")
+        if event_type in {"turn.started", "turn.completed", "turn.failed"}:
+            provider_id = str(event.get("turn_id") or event.get("id") or "turn:current")
+            if event_type == "turn.started":
+                tracer.start_provider_span(provider_id, SpanType.TURN, "turn")
+            else:
+                tracer.finish_provider_span(
+                    provider_id,
+                    SpanType.TURN,
+                    "turn",
+                    status="failed" if event_type == "turn.failed" else "success",
+                    payload={"error": event.get("error")},
+                )
+            return
+        if event_type not in {"item.started", "item.completed"}:
             return
         item = event.get("item") or {}
         if not isinstance(item, dict):
             return
 
         item_type = item.get("type")
+        provider_id = self._item_provider_id(item)
+        if event_type == "item.started":
+            if self._is_tool_item(item_type):
+                tracer.start_provider_span(
+                    provider_id,
+                    SpanType.TOOL,
+                    self._tool_name(item),
+                )
+            return
+
         if item_type == "agent_message":
             text = item.get("text")
             if text:
+                tracer.mark_first_text()
                 self._record(task, kind="agent_text", payload={"text": str(text)})
             return
 
@@ -166,12 +207,48 @@ class CodexCliAgent:
                 self._record(task, kind="agent_thinking", payload={"text": text})
             return
 
-        if item_type in {"tool_call", "function_call", "local_shell_call"}:
+        if self._is_tool_item(item_type):
+            tracer.finish_provider_span(
+                provider_id,
+                SpanType.TOOL,
+                self._tool_name(item),
+                status="failed" if item.get("status") == "failed" else "success",
+                payload={"exit_code": item.get("exit_code")},
+            )
             self._record(
                 task,
                 kind="agent_tool",
                 payload=_normalize_tool_event(self._codex_tool_item_to_raw(item)),
             )
+
+    @staticmethod
+    def _is_tool_item(item_type: Any) -> bool:
+        return item_type in {
+            "tool_call",
+            "function_call",
+            "local_shell_call",
+            "command_execution",
+            "mcp_tool_call",
+            "web_search",
+            "file_change",
+        }
+
+    @staticmethod
+    def _item_provider_id(item: dict[str, Any]) -> str:
+        return str(
+            item.get("id")
+            or f"item:{item.get('type', 'unknown')}:{CodexCliAgent._tool_name(item)}"
+        )
+
+    @staticmethod
+    def _tool_name(item: dict[str, Any]) -> str:
+        return str(
+            item.get("name")
+            or item.get("tool")
+            or item.get("tool_name")
+            or item.get("type")
+            or "tool"
+        )
 
     def _record(self, task: AgentTask, *, kind: str, payload: dict[str, Any]) -> None:
         """Persist an event iff we have a db to write to and a task id."""
@@ -216,7 +293,12 @@ class CodexCliAgent:
 
     @staticmethod
     def _normalize_codex_tool_name(name: str) -> str:
-        if name in {"local_shell_call", "shell", "exec_command"}:
+        if name in {
+            "local_shell_call",
+            "command_execution",
+            "shell",
+            "exec_command",
+        }:
             return "Bash"
         return name
 

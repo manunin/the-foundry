@@ -122,6 +122,32 @@ def test_get_task_detail_404(client: TestClient, _setup_env: Path) -> None:
     assert response.status_code == 404
 
 
+def test_get_task_event_history_pages_before_sequence(
+    client: TestClient,
+    _setup_env: Path,
+) -> None:
+    db = _setup_env
+    task = state.upsert_task(
+        db,
+        Task(
+            repo="owner/repo",
+            issue_number=8,
+            issue_title="History test",
+            issue_body="Body",
+        ),
+    )
+    for index in range(5):
+        record_event(db, task.id, "plan", "agent_text", {"text": str(index)})
+
+    response = client.get(
+        f"/api/tasks/{task.id}/event-history",
+        params={"before_seq": 5, "limit": 2},
+    )
+
+    assert response.status_code == 200
+    assert [event["seq"] for event in response.json()] == [3, 4]
+
+
 def test_reset_task_sets_pending_fetch(client: TestClient, _setup_env: Path) -> None:
     # Arrange
     db = _setup_env
