@@ -16,7 +16,7 @@ services:
       CODEX_SANDBOX_MODE: ${CODEX_SANDBOX_MODE:-danger-full-access}
     volumes:
       - ./data:/app/data
-      - ./worktrees:/app/worktrees
+      - ${WORKTREE_VOLUME:-foundry-worktrees}:/app/worktrees
       - ${HOST_GH_CONFIG_DIR:-./.docker/gh}:/root/.config/gh:ro
       - ${HOST_GLAB_CONFIG_DIR:-./.docker/glab-cli}:/root/.config/glab-cli
     ports:
@@ -48,7 +48,7 @@ services:
       GIT_COMMITTER_EMAIL: ${GIT_COMMITTER_EMAIL:-foundry@example.local}
     volumes:
       - ./data:/app/data
-      - ./worktrees:/app/worktrees
+      - ${WORKTREE_VOLUME:-foundry-worktrees}:/app/worktrees
       - ${HOST_GH_CONFIG_DIR:-./.docker/gh}:/root/.config/gh:ro
       - ${HOST_GLAB_CONFIG_DIR:-./.docker/glab-cli}:/root/.config/glab-cli
       # Uncomment the auth directory for the real coding backend you use.
@@ -81,7 +81,7 @@ services:
       GIT_COMMITTER_EMAIL: ${GIT_COMMITTER_EMAIL:-foundry@example.local}
     volumes:
       - ./data:/app/data
-      - ./worktrees:/app/worktrees
+      - ${WORKTREE_VOLUME:-foundry-worktrees}:/app/worktrees
       - ${HOST_GH_CONFIG_DIR:-./.docker/gh}:/root/.config/gh:ro
       - ${HOST_GLAB_CONFIG_DIR:-./.docker/glab-cli}:/root/.config/glab-cli
       # - ${HOME}/.claude:/root/.claude
@@ -102,3 +102,6 @@ services:
     depends_on:
       api:
         condition: service_healthy
+
+volumes:
+  foundry-worktrees:

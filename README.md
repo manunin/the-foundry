@@ -277,7 +277,7 @@ $EDITOR .env                              # заполнить SOURCE_REPO / TAR
 docker compose up --build
 ```
 
-После старта UI доступен на http://localhost:5173, API — на http://localhost:8000. SQLite и worktree'ы остаются на хосте в `./data` и `./worktrees`, чтобы их можно было смотреть обычными локальными инструментами.
+После старта UI доступен на http://localhost:5173, API — на http://localhost:8000. SQLite остаётся на хосте в `./data`. Worktree'ы по умолчанию хранятся в Docker volume `foundry-worktrees`: на Docker Desktop это устраняет большие задержки Git из-за bind mount. Если нужен доступ к worktree'ам с хоста, установи `WORKTREE_VOLUME=./worktrees` в `.env`; это может заметно замедлить большие репозитории на Windows и macOS.
 
 Compose монтирует локальный `gh` auth из `${HOME}/.config/gh`. Для git-коммитов внутри контейнера по умолчанию используется `Foundry Bot <foundry@example.local>`; при желании переопредели `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` в `.env`. Если хочешь вместо stub включить реальный coding backend, выставь в `.env` нужный `CODING_AGENT` и раскомментируй соответствующий auth-volume в `docker-compose.yml`:
 
