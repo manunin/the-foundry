@@ -213,6 +213,28 @@ AGENT_IMPLEMENT_MAX_TURNS=40
 
 Аутентификация и формат идентификатора модели — на стороне `opencode` CLI; foundry-бэкенд только пробрасывает `-m <model>` и `--session <id>` для resume. Поэтому смену провайдера (DeepSeek → OpenAI → локальный Ollama → …) делаешь правкой `auth.json` + `AGENT_MODEL`, без изменений в коде.
 
+### OpenCode + OpenWebUI / OpenAI-compatible API
+
+Для self-hosted моделей за OpenAI-compatible endpoint можно не класть `opencode.json`
+в каждый target worktree. Foundry передаёт OpenCode inline config через
+`OPENCODE_CONFIG_CONTENT`, когда задан `OPENCODE_OPENAI_BASE_URL`.
+
+```bash
+CODING_AGENT=opencode_cli
+OPENCODE_OPENAI_PROVIDER=openwebui
+OPENCODE_OPENAI_BASE_URL=https://openwebui.ai.bpcbt.com/api/v1
+OPENCODE_OPENAI_MODELS=qwen3-coder,devstral
+AGENT_MODEL=openwebui/qwen3-coder
+OPENAI_API_KEY=<token-or-dummy-if-your-gateway-allows-it>
+```
+
+`AGENT_MODEL` остаётся CLI-facing идентификатором в формате
+`<provider>/<model-id>`, а `OPENCODE_OPENAI_MODELS` содержит model ids так,
+как их ждёт endpoint. URL передаётся как есть: Foundry не добавляет `/v1`.
+Если нужен нестандартный secret env var, задай `OPENCODE_OPENAI_API_KEY_ENV`
+и добавь этот var в `AGENT_ENV_ALLOWLIST`, иначе scrubbed env не передаст его
+в agent subprocess.
+
 > **Observability:** `claude_cli`, `codex_cli` и `opencode_cli` стримят
 > нормализованные agent events и timing spans в `task_events`. Детализация
 > tool/turn зависит от событий, которые предоставляет конкретная версия CLI.

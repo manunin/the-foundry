@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from foundry import state
-from foundry.agents import AgentSettings, AgentStage, AgentTask
-from foundry.agents.opencode_cli import OpencodeCliAgent
+from foundry.agents import AgentSettings, AgentStage, AgentTask, OpenCodeOpenAIConfig
+from foundry.agents.opencode_cli import OpencodeCliAgent, _build_opencode_config_content
 from foundry.events import read_events
 
 
@@ -129,6 +132,84 @@ def test_apply_passes_model_dir_and_format(tmp_path: Path) -> None:
     assert cmd[cmd.index("--dir") + 1] == str(tmp_path)
     assert cmd[cmd.index("-m") + 1] == "openrouter/x-ai/grok"
     assert run.call_args.kwargs["cwd"] == tmp_path
+
+
+def test_build_opencode_config_content_for_openai_compatible_provider() -> None:
+    content = _build_opencode_config_content(
+        OpenCodeOpenAIConfig(
+            provider_id="openwebui",
+            base_url="https://openwebui.example/api/v1",
+            api_key_env="OPENWEBUI_API_KEY",
+            models=("qwen3-coder", "devstral"),
+        )
+    )
+
+    config = json.loads(content)
+
+    assert config["$schema"] == "https://opencode.ai/config.json"
+    provider = config["provider"]["openwebui"]
+    assert provider["npm"] == "@ai-sdk/openai-compatible"
+    assert provider["name"] == "openwebui"
+    assert provider["options"]["baseURL"] == "https://openwebui.example/api/v1"
+    assert provider["options"]["apiKey"] == "{env:OPENWEBUI_API_KEY}"
+    assert provider["models"] == {"qwen3-coder": {}, "devstral": {}}
+
+
+def test_apply_passes_inline_opencode_config_and_scrubbed_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openwebui")
+    agent = OpencodeCliAgent(
+        settings=_settings(
+            model="openwebui/qwen3-coder",
+            opencode_openai=OpenCodeOpenAIConfig(
+                provider_id="openwebui",
+                base_url="https://openwebui.example/api/v1",
+                api_key_env="OPENAI_API_KEY",
+                models=("qwen3-coder",),
+            ),
+        )
+    )
+
+    with patch(
+        "foundry.agents.opencode_cli.iter_cli_jsonl_with_retry",
+        return_value=[{"type": "text", "sessionID": "s", "part": {"text": "ok"}}],
+    ) as run:
+        agent.apply(task=_task(), worktree=tmp_path, input="")
+
+    env = run.call_args.kwargs["env"]
+    config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    assert env["OPENAI_API_KEY"] == "sk-openwebui"
+    assert config["provider"]["openwebui"]["options"]["baseURL"] == (
+        "https://openwebui.example/api/v1"
+    )
+    assert config["provider"]["openwebui"]["models"] == {"qwen3-coder": {}}
+
+
+def test_apply_does_not_pass_unallowlisted_custom_openai_compatible_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENWEBUI_API_KEY", "sk-custom")
+    agent = OpencodeCliAgent(
+        settings=_settings(
+            opencode_openai=OpenCodeOpenAIConfig(
+                provider_id="openwebui",
+                base_url="https://openwebui.example/api/v1",
+                api_key_env="OPENWEBUI_API_KEY",
+                models=("qwen3-coder",),
+            ),
+        )
+    )
+
+    with patch(
+        "foundry.agents.opencode_cli.iter_cli_jsonl_with_retry",
+        return_value=[{"type": "text", "sessionID": "s", "part": {"text": "ok"}}],
+    ) as run:
+        agent.apply(task=_task(), worktree=tmp_path, input="")
+
+    assert "OPENWEBUI_API_KEY" not in run.call_args.kwargs["env"]
 
 
 def test_extract_usage_from_metadata_tokens() -> None:

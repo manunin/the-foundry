@@ -21,6 +21,17 @@ def test_scrubbed_agent_env_keeps_backend_secret_only(monkeypatch: pytest.Monkey
     assert "AWS_SECRET_ACCESS_KEY" not in env
 
 
+def test_scrubbed_agent_env_keeps_custom_secret_from_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENWEBUI_API_KEY", "sk-openwebui")
+    monkeypatch.setenv("AGENT_ENV_ALLOWLIST", "OPENWEBUI_API_KEY")
+
+    env = security.scrubbed_agent_env("opencode_cli")
+
+    assert env["OPENWEBUI_API_KEY"] == "sk-openwebui"
+
+
 def test_shell_guard_denies_rm_rf() -> None:
     with pytest.raises(RuntimeError, match="rm -rf"):
         security.assert_command_allowed(["rm", "-rf", "/tmp/x"])

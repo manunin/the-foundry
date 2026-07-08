@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ from .base import (
     build_fresh_prompt,
     first_line,
 )
-from .config import AgentSettings
+from .config import AgentSettings, OpenCodeOpenAIConfig
 from .streaming import _normalize_tool_event, iter_cli_jsonl_with_retry
 from .tracing import AgentTracer, SpanType
 
@@ -74,7 +75,7 @@ class OpencodeCliAgent:
                 events = iter_cli_jsonl_with_retry(
                     cmd,
                     cwd=worktree,
-                    env=scrubbed_agent_env(self.name),
+                    env=self._subprocess_env(),
                     on_event=lambda ev: self._emit_for(task, ev, tracer),
                     on_lifecycle=tracer.handle_stream_lifecycle,
                     timeout_sec=self._settings.timeout_sec,
@@ -108,6 +109,15 @@ class OpencodeCliAgent:
             tokens_in=(usage or {}).get("input") if usage else None,
             tokens_out=(usage or {}).get("output") if usage else None,
         )
+
+    def _subprocess_env(self) -> dict[str, str]:
+        env = scrubbed_agent_env(self.name)
+        if self._settings.opencode_openai is None:
+            return env
+        env["OPENCODE_CONFIG_CONTENT"] = _build_opencode_config_content(
+            self._settings.opencode_openai
+        )
+        return env
 
     def _emit_for(
         self,
@@ -255,3 +265,23 @@ class OpencodeCliAgent:
                     out["cache_creation_input"] = int(cache["write"])
             return out or None
         return None
+
+
+def _build_opencode_config_content(config: OpenCodeOpenAIConfig) -> str:
+    provider: dict[str, Any] = {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": config.provider_id,
+        "options": {
+            "baseURL": config.base_url,
+            "apiKey": f"{{env:{config.api_key_env}}}",
+        },
+    }
+    if config.models:
+        provider["models"] = {model: {} for model in config.models}
+    return json.dumps(
+        {
+            "$schema": "https://opencode.ai/config.json",
+            "provider": {config.provider_id: provider},
+        },
+        separators=(",", ":"),
+    )

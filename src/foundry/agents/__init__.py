@@ -7,7 +7,7 @@ from .base import (
     CodingAgent,
     first_line,
 )
-from .config import AgentSettings
+from .config import AgentSettings, OpenCodeOpenAIConfig
 from .factory import UnknownBackendError, make_agent
 
 __all__ = [
@@ -16,6 +16,7 @@ __all__ = [
     "AgentStage",
     "AgentTask",
     "CodingAgent",
+    "OpenCodeOpenAIConfig",
     "UnknownBackendError",
     "first_line",
     "make_agent",

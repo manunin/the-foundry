@@ -113,8 +113,8 @@ uv run foundry pr-feedback         # continuous polling по открытым PR
 
 ## Технический стек
 
-- **Агенты**: stub (оффлайн/тесты), claude_cli (Claude Code CLI), codex_cli (OpenAI Codex CLI), opencode_cli (OpenCode — DeepSeek, OpenAI, OpenRouter и др.)
-- **LLM**: Anthropic Claude (Haiku / Sonnet / Opus), OpenAI models через Codex CLI, DeepSeek/OpenRouter/Ollama и другие провайдеры через OpenCode
+- **Агенты**: stub (оффлайн/тесты), claude_cli (Claude Code CLI), codex_cli (OpenAI Codex CLI), opencode_cli (OpenCode — DeepSeek, OpenAI, OpenRouter, OpenAI-compatible endpoints и др.)
+- **LLM**: Anthropic Claude (Haiku / Sonnet / Opus), OpenAI models через Codex CLI, DeepSeek/OpenRouter/Ollama и self-hosted OpenAI-compatible endpoints через OpenCode. Для OpenWebUI/OpenAI-compatible API Foundry передаёт OpenCode inline config через `OPENCODE_CONFIG_CONTENT` и не пишет provider config в task worktree.
 - **Трекер задач**: GitHub Issues (via `gh` CLI)
 - **Языки**: Python 3.11+ (backend + pipeline), TypeScript (frontend)
 - **Фреймворки**: FastAPI (HTTP API), Click (CLI), React 19 + Vite (UI), TanStack React Query

@@ -15,6 +15,10 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         if key.startswith("AGENT_") or key in {
             "CODING_AGENT",
             "CODEX_SANDBOX_MODE",
+            "OPENCODE_OPENAI_API_KEY_ENV",
+            "OPENCODE_OPENAI_BASE_URL",
+            "OPENCODE_OPENAI_MODELS",
+            "OPENCODE_OPENAI_PROVIDER",
             "SAFE_AGENT_MODE",
         }:
             monkeypatch.delenv(key, raising=False)
@@ -107,3 +111,46 @@ def test_from_env_per_stage_sandbox_mode_beats_global(
 
     assert implement.sandbox_mode == "workspace-write"
     assert plan.sandbox_mode == "danger-full-access"
+
+
+def test_from_env_leaves_opencode_openai_disabled_without_base_url() -> None:
+    settings = AgentSettings.from_env(AgentStage.IMPLEMENT)
+
+    assert settings.opencode_openai is None
+
+
+def test_from_env_parses_opencode_openai_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENCODE_OPENAI_BASE_URL", "https://openwebui.example/api/v1")
+    monkeypatch.setenv("AGENT_MODEL", "openwebui/qwen3-coder")
+
+    settings = AgentSettings.from_env(AgentStage.IMPLEMENT)
+
+    assert settings.opencode_openai is not None
+    assert settings.opencode_openai.provider_id == "openwebui"
+    assert settings.opencode_openai.base_url == "https://openwebui.example/api/v1"
+    assert settings.opencode_openai.api_key_env == "OPENAI_API_KEY"
+    assert settings.opencode_openai.models == ("qwen3-coder",)
+    assert settings.model == "openwebui/qwen3-coder"
+
+
+def test_from_env_parses_opencode_openai_provider_key_and_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENCODE_OPENAI_BASE_URL", "http://localhost:8080/api/v1")
+    monkeypatch.setenv("OPENCODE_OPENAI_PROVIDER", "local")
+    monkeypatch.setenv("OPENCODE_OPENAI_API_KEY_ENV", "OPENWEBUI_API_KEY")
+    monkeypatch.setenv(
+        "OPENCODE_OPENAI_MODELS",
+        "qwen3-coder, local/devstral, qwen3-coder",
+    )
+    monkeypatch.setenv("AGENT_MODEL", "local/gpt-oss")
+
+    settings = AgentSettings.from_env(AgentStage.IMPLEMENT)
+
+    assert settings.opencode_openai is not None
+    assert settings.opencode_openai.provider_id == "local"
+    assert settings.opencode_openai.base_url == "http://localhost:8080/api/v1"
+    assert settings.opencode_openai.api_key_env == "OPENWEBUI_API_KEY"
+    assert settings.opencode_openai.models == ("qwen3-coder", "devstral", "gpt-oss")
