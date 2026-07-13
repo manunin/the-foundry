@@ -9,6 +9,7 @@ import pytest
 from foundry import state
 from foundry.agents import AgentSettings, AgentStage, AgentTask, OpenCodeOpenAIConfig
 from foundry.agents.opencode_cli import OpencodeCliAgent, _build_opencode_config_content
+from foundry.agents.streaming import CliProcessError
 from foundry.events import read_events
 
 
@@ -115,6 +116,93 @@ def test_apply_resumes_session_id_from_sqlite(tmp_path: Path) -> None:
 
     cmd = run.call_args.args[0]
     assert cmd[cmd.index("--session") + 1] == "ses_db"
+
+
+def test_apply_retries_fresh_when_persisted_opencode_session_is_missing(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "foundry.sqlite"
+    state.init_db(db)
+    task = _task(task_id=13)
+    settings = _settings(db_path=db)
+    state.save_agent_session(
+        db,
+        task.id,
+        AgentStage.IMPLEMENT.value,
+        "opencode_cli",
+        "ses_gone",
+    )
+    agent = OpencodeCliAgent(settings=settings)
+
+    stale = CliProcessError(
+        ["opencode", "run", "--session", "ses_gone"],
+        1,
+        "Error: Session not found\n",
+    )
+    fresh = [
+        {"type": "step_start", "sessionID": "ses_new"},
+        {"type": "text", "sessionID": "ses_new", "part": {"text": "fixed"}},
+    ]
+    with patch(
+        "foundry.agents.opencode_cli.iter_cli_jsonl_with_retry",
+        side_effect=[stale, fresh],
+    ) as run:
+        result = agent.apply(task=task, worktree=tmp_path, input="more")
+
+    assert result.response == "fixed"
+    assert len(run.call_args_list) == 2
+    first_cmd = run.call_args_list[0].args[0]
+    second_cmd = run.call_args_list[1].args[0]
+    assert first_cmd[first_cmd.index("--session") + 1] == "ses_gone"
+    assert "--session" not in second_cmd
+    assert state.get_agent_session(
+        db, task.id, AgentStage.IMPLEMENT.value, "opencode_cli"
+    ) == "ses_new"
+
+
+def test_prompt_template_uses_separate_session_namespace(tmp_path: Path) -> None:
+    db = tmp_path / "foundry.sqlite"
+    state.init_db(db)
+    task = _task(task_id=15)
+    state.save_agent_session(
+        db,
+        task.id,
+        AgentStage.PLAN.value,
+        "opencode_cli",
+        "ses_default_plan",
+    )
+    agent = OpencodeCliAgent(
+        settings=_settings(
+            stage=AgentStage.PLAN,
+            db_path=db,
+            prompt_template="plan_openspec",
+        )
+    )
+
+    with patch(
+        "foundry.agents.opencode_cli.iter_cli_jsonl_with_retry",
+        return_value=[
+            {"type": "step_start", "sessionID": "ses_openspec_plan"},
+            {"type": "text", "part": {"text": "planned"}},
+        ],
+    ) as run:
+        agent.apply(task=task, worktree=tmp_path, input="")
+
+    cmd = run.call_args.args[0]
+    assert "--session" not in cmd
+    assert "OpenSpec planning agent" in cmd[-1]
+    assert state.get_agent_session(
+        db,
+        task.id,
+        "plan_openspec",
+        "opencode_cli",
+    ) == "ses_openspec_plan"
+    assert state.get_agent_session(
+        db,
+        task.id,
+        AgentStage.PLAN.value,
+        "opencode_cli",
+    ) == "ses_default_plan"
 
 
 def test_apply_passes_model_dir_and_format(tmp_path: Path) -> None:

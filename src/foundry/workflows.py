@@ -15,7 +15,7 @@ refuses to run agent-defined branches.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
@@ -38,6 +38,7 @@ from .models import Stage, Task, TaskStatus
 from .stages import agent_implement as agent_implement_stage
 from .stages import agent_plan as agent_plan_stage
 from .stages import context as context_stage
+from .stages import openspec
 from .stages import issue_comment as issue_comment_stage
 from .stages import pr as pr_stage
 from .stages import verify as verify_stage
@@ -207,36 +208,121 @@ def _build_attempt_input(
     return "".join(parts)
 
 
-def _build_pr_feedback_input(change: ForgeChange, feedback: str) -> str:
-    return "\n".join(
+def _build_pr_feedback_input(
+    change: ForgeChange,
+    feedback: str,
+    *,
+    openspec_context: str | None = None,
+) -> str:
+    lines = [
+        "Address the latest change-request feedback on the existing branch.",
+        "",
+        f"Change request: #{change.number} {change.title}".strip(),
+        f"Branch: `{change.branch}`",
+        f"URL: {change.url}",
+    ]
+    if openspec_context:
+        lines.extend(
+            [
+                "",
+                "## OpenSpec context",
+                openspec_context.strip(),
+            ]
+        )
+    lines.extend(
         [
-            "Address the latest change-request feedback on the existing branch.",
             "",
-            f"Change request: #{change.number} {change.title}".strip(),
-            f"Branch: `{change.branch}`",
-            f"URL: {change.url}",
-            "",
-            "## Feedback",
+            "## Feedback to address",
             feedback.strip(),
+        ]
+    )
+    lines.extend(
+        [
             "",
             "Make the minimal code changes needed to satisfy this feedback. "
             "Do not open a new change request, switch branches, commit, or push.",
         ]
     )
+    return "\n".join(lines)
+
+
+CI_CONFIG_PATH_MARKERS: tuple[str, ...] = (
+    ".gitlab-ci.yml",
+    ".github/workflows/",
+)
+
+
+def _guard_pr_feedback_ci_config_edits(
+    feedback: ChangeFeedback,
+    feedback_text: str,
+    worktree_path: Path,
+    branch_name: str,
+) -> None:
+    if not feedback.failing_checks:
+        return
+    changed_files = _changed_files_for_pr_feedback(worktree_path, branch_name)
+    ci_config_files = [
+        path for path in changed_files if _is_ci_config_path(path)
+    ]
+    if not ci_config_files:
+        return
+    if _feedback_allows_ci_config_edit(feedback_text):
+        return
+    raise RuntimeError(
+        "refusing PR feedback fix: CI/CD feedback must fix the failing build "
+        "inputs, tests, or product code, not CI configuration files. Changed "
+        "CI/CD config files: " + ", ".join(ci_config_files)
+    )
+
+
+def _changed_files_for_pr_feedback(
+    worktree_path: Path,
+    branch_name: str,
+) -> list[str]:
+    paths: set[str] = set()
+    remote_ref = f"origin/{branch_name}"
+    commands = (
+        ["git", "diff", "--name-only", remote_ref, "HEAD"],
+        ["git", "diff", "--name-only"],
+        ["git", "diff", "--name-only", "--cached"],
+    )
+    for cmd in commands:
+        result = shell.run(cmd, cwd=worktree_path, check=False)
+        if not result.ok:
+            continue
+        paths.update(line.strip() for line in result.stdout.splitlines() if line.strip())
+    return sorted(paths)
+
+
+def _is_ci_config_path(path: str) -> bool:
+    normalized = path.replace("\\", "/")
+    return any(
+        normalized == marker or normalized.startswith(marker)
+        for marker in CI_CONFIG_PATH_MARKERS
+    )
+
+
+def _feedback_allows_ci_config_edit(feedback_text: str) -> bool:
+    normalized = feedback_text.replace("\\", "/")
+    return any(marker in normalized for marker in CI_CONFIG_PATH_MARKERS)
 
 
 def _task_for_change(settings: Settings, change: ForgeChange) -> Task | None:
     for task in state.list_tasks(settings.db_path):
-        if task.branch_name == change.branch or task.pr_url == change.url:
+        if task.pr_url and task.pr_url == change.url:
+            return task
+        if task.pr_url and task.branch_name == change.branch:
             return task
     prefix = "foundry/task-"
     if change.branch.startswith(prefix):
         try:
-            return state.get_task(
+            task = state.get_task(
                 settings.db_path, int(change.branch.removeprefix(prefix))
             )
         except ValueError:
             return None
+        if task is not None and task.pr_url:
+            return task
     return None
 
 
@@ -313,6 +399,19 @@ def _block_for_human(
     task.current_stage = blocked_stage
     task.status = TaskStatus.BLOCKED
     return state.upsert_task(settings.db_path, task)
+
+
+def _openspec_mode_requires_setup(settings: Settings, ctx: dict[str, Any]) -> str | None:
+    if not settings.openspec_mode:
+        return None
+    openspec_ctx = ctx.get("openspec")
+    if isinstance(openspec_ctx, dict) and openspec_ctx.get("present"):
+        return None
+    return (
+        "FOUNDRY_OPENSPEC_MODE=true is enabled, but the target worktree does not "
+        "contain OpenSpec artifacts. Initialize OpenSpec in the target repository "
+        "first, then resume this task."
+    )
 
 
 def _prepare_dev_worktree(settings: Settings, task: Task, base: Path) -> tuple[Task, Path, str]:
@@ -402,6 +501,19 @@ def dev_task(
         state.save_stage_result(settings.db_path, task.id, Stage.CONTEXT, ctx)
         state.append_log(settings.db_path, task.id, Stage.CONTEXT, {"ok": True})
 
+    openspec_setup_error = _openspec_mode_requires_setup(settings, ctx)
+    if openspec_setup_error:
+        task = _mark(settings, task, stage=Stage.PLAN)
+        return _block_for_human(
+            settings,
+            task,
+            blocked_stage=Stage.PLAN,
+            reason="openspec setup required",
+            questions=openspec_setup_error,
+            worktree_path=wt_path,
+            provider=active_provider,
+        )
+
     # PLAN
     plan = state.get_stage_result(settings.db_path, task.id, Stage.PLAN)
     if plan is None:
@@ -409,13 +521,23 @@ def dev_task(
         plan_agent_settings = AgentSettings.from_env(
             AgentStage.PLAN, db_path=settings.db_path
         )
+        if settings.openspec_mode:
+            plan_agent_settings = replace(
+                plan_agent_settings,
+                prompt_template="plan_openspec",
+            )
         plan_agent_task = AgentTask(
             id=task.id or task.issue_number,
             title=task.issue_title,
             description=task.issue_body,
         )
         plan_input = context_stage.format_for_prompt(ctx)
-        plan_prompt = build_fresh_prompt(AgentStage.PLAN, plan_agent_task, plan_input)
+        plan_prompt = build_fresh_prompt(
+            AgentStage.PLAN,
+            plan_agent_task,
+            plan_input,
+            template_name=plan_agent_settings.prompt_template,
+        )
         with stage_span(
             settings.db_path,
             task.id,
@@ -469,6 +591,9 @@ def dev_task(
             previous_summary=impl_result.get("result", "") if attempt > 1 else "",
             previous_report=decision.report if attempt > 1 else "",
         )
+        if attempt > 1:
+            attempt_plan["_previous_implement_summary"] = impl_result.get("result", "")
+            attempt_plan["_previous_verification_report"] = decision.report
 
         saved_impl = state.get_stage_result(
             settings.db_path, task.id, Stage.IMPLEMENT, attempt=attempt
@@ -493,13 +618,26 @@ def dev_task(
             impl_agent_settings = AgentSettings.from_env(
                 AgentStage.IMPLEMENT, db_path=settings.db_path
             )
+            impl_input = agent_implement_stage.build_agent_input(
+                attempt_plan,
+                wt_path,
+                settings,
+            )
+            if settings.openspec_mode:
+                impl_agent_settings = replace(
+                    impl_agent_settings,
+                    prompt_template="implement_openspec",
+                )
             impl_agent_task = AgentTask(
                 id=task.id or task.issue_number,
                 title=task.issue_title,
                 description=task.issue_body,
             )
             impl_prompt = build_fresh_prompt(
-                AgentStage.IMPLEMENT, impl_agent_task, attempt_plan["plan"]
+                AgentStage.IMPLEMENT,
+                impl_agent_task,
+                impl_input,
+                template_name=impl_agent_settings.prompt_template,
             )
             with stage_span(
                 settings.db_path,
@@ -817,9 +955,26 @@ def pr_feedback(
     task = state.upsert_task(settings.db_path, task)
 
     try:
-        implement_input = _build_pr_feedback_input(change, feedback_text)
+        openspec_context = (
+            openspec.build_implementation_handoff(
+                wt_path,
+                timeout_sec=settings.verify_command_timeout_sec,
+                include_skill_bodies=False,
+            )
+            if settings.openspec_mode
+            else None
+        )
+        implement_input = _build_pr_feedback_input(
+            change,
+            feedback_text,
+            openspec_context=openspec_context,
+        )
         impl_agent_settings = AgentSettings.from_env(
             AgentStage.IMPLEMENT, db_path=settings.db_path
+        )
+        impl_agent_settings = replace(
+            impl_agent_settings,
+            prompt_template="pr_feedback",
         )
         impl_agent_task = AgentTask(
             id=task.id or task.issue_number,
@@ -827,7 +982,10 @@ def pr_feedback(
             description=task.issue_body,
         )
         impl_prompt = build_fresh_prompt(
-            AgentStage.IMPLEMENT, impl_agent_task, implement_input
+            AgentStage.IMPLEMENT,
+            impl_agent_task,
+            implement_input,
+            template_name=impl_agent_settings.prompt_template,
         )
         with stage_span(
             settings.db_path,
@@ -844,7 +1002,10 @@ def pr_feedback(
             },
         ) as finish:
             impl_result = agent_implement_stage.run(
-                task, {"plan": implement_input}, wt_path, settings
+                task,
+                {"plan": implement_input, "_prompt_template": "pr_feedback"},
+                wt_path,
+                settings,
             )
             finish(
                 output={
@@ -924,6 +1085,12 @@ def pr_feedback(
                 "PR feedback fix did not pass verification: " + decision.report
             )
 
+        _guard_pr_feedback_ci_config_edits(
+            feedback,
+            feedback_text,
+            wt_path,
+            branch_name,
+        )
         task = _mark(settings, task, stage=Stage.PR)
         commit_message = f"foundry: address PR feedback for task #{task.issue_number}"
         with stage_span(
@@ -936,11 +1103,25 @@ def pr_feedback(
             },
         ) as finish:
             push_result = pr_stage.commit_and_push_changes(
-                task, wt_path, branch_name, commit_message
+                task,
+                wt_path,
+                branch_name,
+                commit_message,
+                allow_no_changes=True,
             )
+            if push_result.get("pushed", True):
+                summary = (
+                    "The Foundry pushed a follow-up commit addressing the latest "
+                    "PR feedback."
+                )
+            else:
+                summary = (
+                    "The Foundry validated the latest PR feedback and no follow-up "
+                    "commit was needed."
+                )
             comment = "\n".join(
                 [
-                    "The Foundry pushed a follow-up commit addressing the latest PR feedback.",
+                    summary,
                     "",
                     "## Verification",
                     decision.report.strip() or "Verification passed.",
@@ -1010,10 +1191,17 @@ def pr_feedback_once(
             )
             continue
 
-        result = pr_feedback(settings, task, change, feedback, active_provider)
-        # Persist hash so next pass skips unchanged feedback
-        state.save_repo_memory(
-            settings.db_path, settings.target_repo, hash_key, current_hash
-        )
-        processed.append(result)
+        try:
+            result = pr_feedback(settings, task, change, feedback, active_provider)
+        except Exception:
+            failed_task = state.get_task(settings.db_path, task.id) or task
+            failed_task.status = TaskStatus.FAILED
+            failed_task.current_stage = Stage.FAILED
+            state.upsert_task(settings.db_path, failed_task)
+            raise
+        else:
+            state.save_repo_memory(
+                settings.db_path, settings.target_repo, hash_key, current_hash
+            )
+            processed.append(result)
     return processed

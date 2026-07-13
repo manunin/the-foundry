@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from foundry.agents import AgentResult, AgentStage
 from foundry.config import Settings
 from foundry.models import Task
+from foundry.shell import Result
 from foundry.stages import agent_implement, agent_plan
 
 
@@ -39,7 +41,11 @@ def _fake_agent(stage: AgentStage, response: str, result: str) -> MagicMock:
 
 
 def test_agent_plan_delegates_to_plan_agent_and_returns_full_response(tmp_path: Path) -> None:
-    fake = _fake_agent(AgentStage.PLAN, response="full plan text\nstep 1", result="full plan text")
+    fake = _fake_agent(
+        AgentStage.PLAN,
+        response="full plan text\nstep 1",
+        result="full plan text",
+    )
     ctx = {
         "languages": [{"language": "Python", "files": 2}],
         "manifest_files": ["pyproject.toml"],
@@ -49,7 +55,12 @@ def test_agent_plan_delegates_to_plan_agent_and_returns_full_response(tmp_path: 
     }
 
     with patch("foundry.stages.agent_plan.make_agent", return_value=fake) as make:
-        out = agent_plan.run(_task(), ctx=ctx, worktree_path=tmp_path, settings=_settings(tmp_path))
+        out = agent_plan.run(
+            _task(),
+            ctx=ctx,
+            worktree_path=tmp_path,
+            settings=_settings(tmp_path),
+        )
 
     make.assert_called_once()
     assert make.call_args.args[0].stage is AgentStage.PLAN
@@ -70,6 +81,17 @@ def test_agent_plan_delegates_to_plan_agent_and_returns_full_response(tmp_path: 
     }
 
 
+def test_agent_plan_uses_openspec_prompt_template_in_forced_mode(tmp_path: Path) -> None:
+    settings = replace(_settings(tmp_path), openspec_mode=True)
+    fake = _fake_agent(AgentStage.PLAN, response="openspec artifacts", result="openspec")
+
+    with patch("foundry.stages.agent_plan.make_agent", return_value=fake) as make:
+        agent_plan.run(_task(), ctx={}, worktree_path=tmp_path, settings=settings)
+
+    assert make.call_args.args[0].stage is AgentStage.PLAN
+    assert make.call_args.args[0].prompt_template == "plan_openspec"
+
+
 def test_agent_plan_falls_back_to_issue_number_when_task_has_no_db_id(tmp_path: Path) -> None:
     task = _task()
     task.id = None
@@ -83,10 +105,19 @@ def test_agent_plan_falls_back_to_issue_number_when_task_has_no_db_id(tmp_path: 
 
 def test_agent_implement_feeds_plan_text_to_implement_agent(tmp_path: Path) -> None:
     plan = {"plan": "step A\nstep B", "summary": "step A"}
-    fake = _fake_agent(AgentStage.IMPLEMENT, response="changed 2 files", result="changed 2 files")
+    fake = _fake_agent(
+        AgentStage.IMPLEMENT,
+        response="changed 2 files",
+        result="changed 2 files",
+    )
 
     with patch("foundry.stages.agent_implement.make_agent", return_value=fake) as make:
-        out = agent_implement.run(_task(), plan, worktree_path=tmp_path, settings=_settings(tmp_path))
+        out = agent_implement.run(
+            _task(),
+            plan,
+            worktree_path=tmp_path,
+            settings=_settings(tmp_path),
+        )
 
     assert make.call_args.args[0].stage is AgentStage.IMPLEMENT
     assert fake.apply.call_args.kwargs["input"] == "step A\nstep B"
@@ -101,10 +132,158 @@ def test_agent_implement_feeds_plan_text_to_implement_agent(tmp_path: Path) -> N
     }
 
 
+def test_agent_implement_uses_openspec_handoff_in_forced_mode(tmp_path: Path) -> None:
+    settings = replace(_settings(tmp_path), openspec_mode=True)
+    plan = {
+        "plan": "Let me explore the repository.\nNow I have enough information.",
+    }
+    fake = _fake_agent(
+        AgentStage.IMPLEMENT,
+        response="changed 2 files",
+        result="changed 2 files",
+    )
+
+    with patch(
+        "foundry.stages.agent_implement.make_agent",
+        return_value=fake,
+    ) as make, patch(
+        "foundry.stages.agent_implement.openspec.build_implementation_handoff",
+        return_value=(
+            "## OpenSpec implementation handoff\n"
+            "- `openspec/changes/add-api/tasks.md`"
+        ),
+    ) as handoff:
+        agent_implement.run(_task(), plan, worktree_path=tmp_path, settings=settings)
+
+    assert make.call_args.args[0].stage is AgentStage.IMPLEMENT
+    assert make.call_args.args[0].prompt_template == "implement_openspec"
+    assert fake.apply.call_args.kwargs["task"].id == 5
+    handoff.assert_called_once_with(
+        tmp_path,
+        timeout_sec=settings.verify_command_timeout_sec,
+    )
+    assert fake.apply.call_args.kwargs["input"].startswith(
+        "## OpenSpec implementation handoff"
+    )
+    assert "Let me explore" not in fake.apply.call_args.kwargs["input"]
+
+
+def test_agent_implement_appends_retry_feedback_to_openspec_handoff(
+    tmp_path: Path,
+) -> None:
+    settings = replace(_settings(tmp_path), openspec_mode=True)
+    fake = _fake_agent(
+        AgentStage.IMPLEMENT,
+        response="changed tasks",
+        result="changed tasks",
+    )
+
+    with patch(
+        "foundry.stages.agent_implement.make_agent",
+        return_value=fake,
+    ), patch(
+        "foundry.stages.agent_implement.openspec.build_implementation_handoff",
+        return_value=(
+            "## OpenSpec implementation handoff\n"
+            "- `openspec/changes/add-api/tasks.md`"
+        ),
+    ):
+        agent_implement.run(
+            _task(),
+            {
+                "plan": "generic planner transcript",
+                "_previous_implement_summary": "changed spec files",
+                "_previous_verification_report": "Change must have at least one delta",
+            },
+            worktree_path=tmp_path,
+            settings=settings,
+        )
+
+    agent_input = fake.apply.call_args.kwargs["input"]
+    assert agent_input.startswith("## OpenSpec implementation handoff")
+    assert "Previous attempt feedback" in agent_input
+    assert "changed spec files" in agent_input
+    assert "Change must have at least one delta" in agent_input
+    assert "generic planner transcript" not in agent_input
+
+
+def test_agent_implement_pr_feedback_template_overrides_openspec_mode(
+    tmp_path: Path,
+) -> None:
+    settings = replace(_settings(tmp_path), openspec_mode=True)
+    fake = _fake_agent(
+        AgentStage.IMPLEMENT,
+        response="changed tasks",
+        result="changed tasks",
+    )
+
+    with patch(
+        "foundry.stages.agent_implement.make_agent",
+        return_value=fake,
+    ) as make, patch(
+        "foundry.stages.agent_implement.openspec.build_implementation_handoff",
+    ) as handoff:
+        agent_implement.run(
+            _task(),
+            plan={
+                "plan": "Address MR feedback with OpenSpec context",
+                "_prompt_template": "pr_feedback",
+            },
+            worktree_path=tmp_path,
+            settings=settings,
+        )
+
+    assert make.call_args.args[0].prompt_template == "pr_feedback"
+    assert fake.apply.call_args.kwargs["input"] == (
+        "Address MR feedback with OpenSpec context"
+    )
+    handoff.assert_not_called()
+
+
+def test_agent_implement_recovers_local_commit_after_agent_failure(
+    tmp_path: Path,
+) -> None:
+    task = _task()
+    task.branch_name = "foundry/task-101"
+    fake = MagicMock()
+    fake.name = "fake"
+    fake.apply.side_effect = RuntimeError("opencode exited with code 1")
+
+    def fake_run(cmd: list[str], **kwargs: object) -> Result:
+        if cmd[:3] == ["git", "status", "--porcelain"]:
+            return Result(returncode=0, stdout="", stderr="")
+        if cmd[:3] == ["git", "rev-list", "--count"]:
+            return Result(returncode=0, stdout="1\n", stderr="")
+        if cmd[:3] == ["git", "diff", "--name-only"]:
+            return Result(returncode=0, stdout="db/changelog.xml\n", stderr="")
+        return Result(returncode=1, stdout="", stderr="unexpected command")
+
+    with patch("foundry.stages.agent_implement.make_agent", return_value=fake), patch(
+        "foundry.stages.agent_implement.shell.run",
+        side_effect=fake_run,
+    ):
+        out = agent_implement.run(
+            task,
+            plan={"plan": "apply feedback"},
+            worktree_path=tmp_path,
+            settings=_settings(tmp_path),
+        )
+
+    assert out["result"] == "recovered local work after agent failure"
+    assert out["recovered_after_agent_error"] is True
+    assert out["local_files"] == ["db/changelog.xml"]
+    assert "Foundry preserved the worktree" in out["response"]
+
+
 def test_agent_implement_handles_plan_without_plan_key(tmp_path: Path) -> None:
     fake = _fake_agent(AgentStage.IMPLEMENT, "ok", "ok")
 
     with patch("foundry.stages.agent_implement.make_agent", return_value=fake):
-        agent_implement.run(_task(), plan={"steps": []}, worktree_path=tmp_path, settings=_settings(tmp_path))
+        agent_implement.run(
+            _task(),
+            plan={"steps": []},
+            worktree_path=tmp_path,
+            settings=_settings(tmp_path),
+        )
 
     assert fake.apply.call_args.kwargs["input"] == ""

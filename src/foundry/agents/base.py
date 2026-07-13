@@ -56,18 +56,25 @@ def first_line(text: str, limit: int = 200) -> str:
     return ""
 
 
-def load_prompt_template(stage: AgentStage) -> str:
-    return (PROMPTS_DIR / f"{stage.value}.md").read_text(encoding="utf-8")
+def load_prompt_template(stage: AgentStage, template_name: str | None = None) -> str:
+    name = template_name or stage.value
+    return (PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8")
 
 
-def build_fresh_prompt(stage: AgentStage, task: AgentTask, input: str) -> str:
+def build_fresh_prompt(
+    stage: AgentStage,
+    task: AgentTask,
+    input: str,
+    *,
+    template_name: str | None = None,
+) -> str:
     """Compose the initial prompt the first time an agent sees a task.
 
-    Template lives at `src/foundry/agents/prompts/<stage>.md` and owns the
-    role description, rules, and output format. Caller only supplies `input`
-    (plan text for implement, diff for verify, clarification hints, ...).
+    Template lives at `src/foundry/agents/prompts/<name>.md` and owns the role
+    description, rules, and output format. Caller only supplies `input` (plan
+    text for implement, diff for verify, clarification hints, ...).
     """
-    template = load_prompt_template(stage)
+    template = load_prompt_template(stage, template_name=template_name)
     return template.format(
         title=task.title,
         description=task.description,

@@ -39,6 +39,7 @@ class CodexCliAgent:
     def __init__(self, settings: AgentSettings) -> None:
         self._settings = settings
         self.stage: AgentStage = settings.stage
+        self._session_stage = settings.prompt_template or settings.stage.value
         self._sessions: dict[int, str] = {}
 
     def apply(
@@ -49,7 +50,12 @@ class CodexCliAgent:
     ) -> AgentResult:
         resume_id = self.get_session_id(task)
         if resume_id is None:
-            prompt = build_fresh_prompt(self.stage, task, input)
+            prompt = build_fresh_prompt(
+                self.stage,
+                task,
+                input,
+                template_name=self._settings.prompt_template,
+            )
             cmd = self._fresh_cmd(worktree, prompt)
         else:
             prompt = input
@@ -84,7 +90,7 @@ class CodexCliAgent:
                         state.save_agent_session(
                             self._settings.db_path,
                             task.id,
-                            self.stage.value,
+                            self._session_stage,
                             self.name,
                             new_session_id,
                         )
@@ -113,7 +119,7 @@ class CodexCliAgent:
         if self._settings.db_path is None:
             return None
         session_id = state.get_agent_session(
-            self._settings.db_path, task.id, self.stage.value, self.name
+            self._settings.db_path, task.id, self._session_stage, self.name
         )
         if session_id:
             self._sessions[task.id] = session_id

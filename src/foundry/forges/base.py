@@ -64,6 +64,16 @@ class FeedbackItem:
     external_id: str
     body: str
     author: str = "unknown"
+    file_path: str | None = None
+    line: int | None = None
+
+    @property
+    def location(self) -> str | None:
+        if not self.file_path:
+            return None
+        if self.line is None:
+            return self.file_path
+        return f"{self.file_path}:{self.line}"
 
 
 @dataclass(frozen=True)
@@ -71,6 +81,11 @@ class CheckResult:
     external_id: str
     name: str
     state: str
+    url: str | None = None
+    details: str | None = None
+
+
+TRACK_CI_FEEDBACK = True
 
 
 @dataclass(frozen=True)
@@ -80,14 +95,27 @@ class ChangeFeedback:
 
     @property
     def actionable(self) -> bool:
-        return bool(self.items or self.failing_checks)
+        return bool(self.items or (TRACK_CI_FEEDBACK and self.failing_checks))
 
     @property
     def fingerprint(self) -> str:
-        values = [f"item:{item.external_id}" for item in self.items]
-        values.extend(
-            f"check:{check.external_id}:{check.state}" for check in self.failing_checks
-        )
+        values = [
+            f"item:{item.external_id}:{item.location or ''}:{item.body}"
+            for item in self.items
+        ]
+        if TRACK_CI_FEEDBACK:
+            values.extend(
+                ":".join(
+                    [
+                        "check",
+                        check.external_id,
+                        check.state,
+                        check.url or "",
+                        check.details or "",
+                    ]
+                )
+                for check in self.failing_checks
+            )
         canonical = "\n".join(sorted(values))
         return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
@@ -95,13 +123,17 @@ class ChangeFeedback:
         parts: list[str] = []
         if self.items:
             lines = ["### Requested changes"]
-            lines.extend(f"- {item.author}: {item.body}" for item in self.items)
+            for item in self.items:
+                location = f" on `{item.location}`" if item.location else ""
+                lines.append(f"- {item.author}{location}: {item.body}")
             parts.append("\n".join(lines))
-        if self.failing_checks:
+        if TRACK_CI_FEEDBACK and self.failing_checks:
             lines = ["### Failing CI"]
-            lines.extend(
-                f"- {check.name}: {check.state}" for check in self.failing_checks
-            )
+            for check in self.failing_checks:
+                suffix = f" ({check.url})" if check.url else ""
+                lines.append(f"- {check.name}: {check.state}{suffix}")
+                if check.details:
+                    lines.append(f"  {check.details}")
             parts.append("\n".join(lines))
         return "\n\n".join(parts)
 

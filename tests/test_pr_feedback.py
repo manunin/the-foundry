@@ -1,18 +1,23 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from foundry import state, workflows
 from foundry.config import Settings
 from foundry.events import read_events
 from foundry.forges import (
+    TRACK_CI_FEEDBACK,
     ChangeFeedback,
     CheckResult,
     FeedbackItem,
     ForgeChange,
 )
 from foundry.models import ForgeKind, Stage, Task, TaskStatus
+from foundry.shell import Result
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -40,7 +45,17 @@ def _seed_task(db_path: Path) -> Task:
     return state.upsert_task(db_path, task)
 
 
-def test_change_feedback_formats_requested_changes_and_failing_ci() -> None:
+def _latest_implement_prompt(db_path: Path, task_id: int) -> str:
+    events = read_events(db_path, task_id=task_id)
+    started = [
+        event
+        for event in events
+        if event.stage == Stage.IMPLEMENT.value and event.kind == "stage_started"
+    ]
+    return str(started[-1].payload["input"]["prompt"])
+
+
+def test_change_feedback_includes_failing_ci() -> None:
     feedback = ChangeFeedback(
         items=(
             FeedbackItem(
@@ -51,10 +66,48 @@ def test_change_feedback_formats_requested_changes_and_failing_ci() -> None:
     )
     formatted = feedback.format()
 
+    assert TRACK_CI_FEEDBACK is True
+    assert feedback.actionable is True
     assert "Requested changes" in formatted
     assert "Please add a regression test." in formatted
     assert "Failing CI" in formatted
     assert "lint: FAILURE" in formatted
+
+
+def test_change_feedback_allows_ci_only_feedback() -> None:
+    feedback = ChangeFeedback(
+        failing_checks=(CheckResult("check-1", "lint", "FAILURE"),),
+    )
+
+    assert feedback.actionable is True
+    assert feedback.format() == "### Failing CI\n- lint: FAILURE"
+
+
+def test_change_feedback_fingerprint_includes_ci_details() -> None:
+    first = ChangeFeedback(
+        failing_checks=(
+            CheckResult(
+                "pipeline-1",
+                "pipeline",
+                "FAILED",
+                "https://gitlab.example/pipelines/1",
+                "pytest: FAILED; url: https://gitlab.example/jobs/1",
+            ),
+        )
+    )
+    second = ChangeFeedback(
+        failing_checks=(
+            CheckResult(
+                "pipeline-1",
+                "pipeline",
+                "FAILED",
+                "https://gitlab.example/pipelines/1",
+                "ruff: FAILED; url: https://gitlab.example/jobs/2",
+            ),
+        )
+    )
+
+    assert first.fingerprint != second.fingerprint
 
 
 def test_pr_feedback_once_applies_fix_pushes_same_branch_and_comments(tmp_path: Path) -> None:
@@ -68,7 +121,8 @@ def test_pr_feedback_once_applies_fix_pushes_same_branch_and_comments(tmp_path: 
         url="https://github.com/owner/sandbox/pull/7",
     )
     feedback = ChangeFeedback(
-        items=(FeedbackItem("review-1", "Add regression coverage.", "reviewer"),)
+        items=(FeedbackItem("review-1", "Add regression coverage.", "reviewer"),),
+        failing_checks=(CheckResult("pipeline-1", "pipeline", "FAILED"),),
     )
     provider = MagicMock()
     provider.kind = ForgeKind.GITHUB
@@ -101,6 +155,8 @@ def test_pr_feedback_once_applies_fix_pushes_same_branch_and_comments(tmp_path: 
 
     implement_input = implement.call_args.args[1]["plan"]
     assert "Add regression coverage." in implement_input
+    assert "Failing CI" in implement_input
+    assert "pipeline: FAILED" in implement_input
     push.assert_called_once()
     assert push.call_args.args[2] == "foundry/task-1"
     provider.comment_change.assert_called_once()
@@ -111,6 +167,306 @@ def test_pr_feedback_once_applies_fix_pushes_same_branch_and_comments(tmp_path: 
     assert feedback_events[0].payload["status"] == "pending"
     assert feedback_events[0].payload["stage"] == "implement"
     assert "Add regression coverage." in feedback_events[0].payload["feedback"]
+    prompt = _latest_implement_prompt(settings.db_path, task.id)
+    assert "applying feedback from an existing change request" in prompt
+    assert "Add regression coverage." in prompt
+    assert "Human clarification from issue comments" not in prompt
+    assert "Этап 1" not in prompt
+    assert "Failing CI" in prompt
+    assert "pipeline: FAILED" in prompt
+    assert "Do not edit CI/CD configuration files" in prompt
+    assert ".gitlab-ci.yml" in prompt
+
+
+def test_pr_feedback_openspec_mode_includes_openspec_context(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    settings = replace(settings, openspec_mode=True)
+    state.init_db(settings.db_path)
+    task = _seed_task(settings.db_path)
+    task.issue_body += "\n\n## Human clarification from issue comments\nstale"
+    task = state.upsert_task(settings.db_path, task)
+    change = ForgeChange(
+        number=7,
+        title="foundry: task",
+        branch="foundry/task-1",
+        url="https://github.com/owner/sandbox/pull/7",
+    )
+    feedback = ChangeFeedback(
+        items=(
+            FeedbackItem(
+                "review-1",
+                "Please validate openspec/changes/demo/tasks.md and tick done tasks.",
+                "reviewer",
+            ),
+        )
+    )
+    provider = MagicMock()
+    provider.kind = ForgeKind.GITHUB
+    provider.list_changes.return_value = [change]
+    provider.load_feedback.return_value = feedback
+
+    with patch(
+        "foundry.workflows._prepare_pr_feedback_worktree",
+        return_value=(tmp_path / "base", tmp_path / "wt"),
+    ), patch("foundry.workflows.worktree.cleanup_worktree"), patch(
+        "foundry.workflows.openspec.build_implementation_handoff",
+        return_value="Active change: demo\n- openspec/changes/demo/tasks.md",
+    ) as handoff, patch(
+        "foundry.workflows.agent_implement_stage.run",
+        return_value={"result": "fixed", "response": ""},
+    ) as implement, patch(
+        "foundry.workflows.verify_stage.run",
+        return_value={"passed": True, "report": "green"},
+    ), patch(
+        "foundry.workflows.pr_stage.commit_and_push_changes",
+        return_value={"branch": "foundry/task-1", "files_changed": 1},
+    ):
+        workflows.pr_feedback_once(settings, provider)
+
+    handoff.assert_called_once_with(
+        tmp_path / "wt",
+        timeout_sec=settings.verify_command_timeout_sec,
+        include_skill_bodies=False,
+    )
+    implement_input = implement.call_args.args[1]["plan"]
+    assert "## OpenSpec context" in implement_input
+    assert "Active change: demo" in implement_input
+    assert implement_input.rfind("## Feedback to address") > implement_input.rfind(
+        "## OpenSpec context"
+    )
+    assert "Please validate openspec/changes/demo/tasks.md" in implement_input
+    assert implement.call_args.args[1]["_prompt_template"] == "pr_feedback"
+
+    prompt = _latest_implement_prompt(settings.db_path, task.id)
+    assert "OpenSpec context" in prompt
+    assert "Active change: demo" in prompt
+    assert "Human clarification from issue comments" not in prompt
+    assert "Этап 1" not in prompt
+
+
+def test_pr_feedback_allows_verified_noop_fix(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    state.init_db(settings.db_path)
+    task = _seed_task(settings.db_path)
+    change = ForgeChange(
+        number=7,
+        title="foundry: task",
+        branch="foundry/task-1",
+        url="https://github.com/owner/sandbox/pull/7",
+    )
+    feedback = ChangeFeedback(
+        items=(
+            FeedbackItem(
+                "review-1",
+                "Validate openspec/changes/demo/tasks.md.",
+                "reviewer",
+            ),
+        )
+    )
+    provider = MagicMock()
+    provider.kind = ForgeKind.GITHUB
+    provider.list_changes.return_value = [change]
+    provider.load_feedback.return_value = feedback
+
+    with patch(
+        "foundry.workflows._prepare_pr_feedback_worktree",
+        return_value=(tmp_path / "base", tmp_path / "wt"),
+    ), patch("foundry.workflows.worktree.cleanup_worktree"), patch(
+        "foundry.workflows.agent_implement_stage.run",
+        return_value={"result": "validated", "response": ""},
+    ), patch(
+        "foundry.workflows.verify_stage.run",
+        return_value={"passed": True, "report": "green"},
+    ), patch(
+        "foundry.workflows.pr_stage.commit_and_push_changes",
+        return_value={
+            "branch": "foundry/task-1",
+            "files_changed": 0,
+            "touched_files": [],
+            "pushed": False,
+        },
+    ) as push:
+        processed = workflows.pr_feedback_once(settings, provider)
+
+    assert [t.id for t in processed] == [task.id]
+    push.assert_called_once()
+    assert push.call_args.kwargs["allow_no_changes"] is True
+    provider.comment_change.assert_called_once()
+    comment = provider.comment_change.call_args.args[2]
+    assert "no follow-up commit was needed" in comment
+    assert "pushed a follow-up commit" not in comment
+    final = state.get_task(settings.db_path, task.id)
+    assert final.status == TaskStatus.DONE
+    assert final.current_stage == Stage.DONE
+
+
+def test_pr_feedback_once_applies_ci_only_feedback(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    state.init_db(settings.db_path)
+    task = _seed_task(settings.db_path)
+    change = ForgeChange(
+        number=7,
+        title="foundry: task",
+        branch="foundry/task-1",
+        url="https://github.com/owner/sandbox/pull/7",
+    )
+    feedback = ChangeFeedback(
+        failing_checks=(CheckResult("pipeline-1", "pipeline", "FAILED"),)
+    )
+    provider = MagicMock()
+    provider.kind = ForgeKind.GITHUB
+    provider.list_changes.return_value = [change]
+    provider.load_feedback.return_value = feedback
+
+    with patch(
+        "foundry.workflows.pr_feedback",
+        return_value=task,
+    ) as apply_feedback:
+        processed = workflows.pr_feedback_once(settings, provider)
+
+    assert [t.id for t in processed] == [task.id]
+    apply_feedback.assert_called_once()
+    final = state.get_task(settings.db_path, task.id)
+    assert final.status == TaskStatus.DONE
+    assert final.current_stage == Stage.DONE
+    assert state.get_repo_memory(
+        settings.db_path,
+        settings.target_repo,
+        f"pr_feedback_hash:{task.id}",
+    )
+
+
+def test_pr_feedback_once_does_not_dedupe_failed_attempt(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    state.init_db(settings.db_path)
+    task = _seed_task(settings.db_path)
+    change = ForgeChange(
+        number=7,
+        title="foundry: task",
+        branch="foundry/task-1",
+        url="https://github.com/owner/sandbox/pull/7",
+    )
+    feedback = ChangeFeedback(
+        failing_checks=(
+            CheckResult(
+                "pipeline-1",
+                "pipeline",
+                "FAILED",
+                "https://gitlab.example/pipelines/1",
+                "pytest: FAILED; url: https://gitlab.example/jobs/1",
+            ),
+        )
+    )
+    provider = MagicMock()
+    provider.kind = ForgeKind.GITHUB
+    provider.list_changes.return_value = [change]
+    provider.load_feedback.return_value = feedback
+
+    with patch(
+        "foundry.workflows.pr_feedback",
+        side_effect=RuntimeError("verification failed"),
+    ), pytest.raises(RuntimeError, match="verification failed"):
+        workflows.pr_feedback_once(settings, provider)
+
+    assert (
+        state.get_repo_memory(
+            settings.db_path,
+            settings.target_repo,
+            f"pr_feedback_hash:{task.id}",
+        )
+        is None
+    )
+    final = state.get_task(settings.db_path, task.id)
+    assert final.status == TaskStatus.FAILED
+    assert final.current_stage == Stage.FAILED
+
+
+def test_pr_feedback_ci_guard_rejects_ci_config_edits(tmp_path: Path) -> None:
+    feedback = ChangeFeedback(
+        failing_checks=(
+            CheckResult("pipeline-1", "pipeline", "FAILED", details="pytest failed"),
+        )
+    )
+
+    with patch(
+        "foundry.workflows.shell.run",
+        return_value=Result(0, ".gitlab-ci.yml\nsrc/app.py\n", ""),
+    ):
+        with pytest.raises(RuntimeError, match="CI/CD config files"):
+            workflows._guard_pr_feedback_ci_config_edits(
+                feedback,
+                feedback.format(),
+                tmp_path,
+                "foundry/task-1",
+            )
+
+
+def test_pr_feedback_ci_guard_allows_explicit_ci_config_feedback(
+    tmp_path: Path,
+) -> None:
+    feedback = ChangeFeedback(
+        items=(
+            FeedbackItem(
+                "review-1",
+                "The .gitlab-ci.yml build job uses the wrong Maven command.",
+                "reviewer",
+            ),
+        ),
+        failing_checks=(
+            CheckResult("pipeline-1", "pipeline", "FAILED", details="pytest failed"),
+        ),
+    )
+
+    with patch(
+        "foundry.workflows.shell.run",
+        return_value=Result(0, ".gitlab-ci.yml\n", ""),
+    ):
+        workflows._guard_pr_feedback_ci_config_edits(
+            feedback,
+            feedback.format(),
+            tmp_path,
+            "foundry/task-1",
+        )
+
+
+def test_pr_feedback_once_ignores_branch_match_without_persisted_pr_url(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    state.init_db(settings.db_path)
+    task = Task(
+        repo="owner/sandbox",
+        issue_number=43,
+        issue_title="new issue after db reset",
+        issue_body="please",
+        branch_name="foundry/task-1",
+        pr_url=None,
+        status=TaskStatus.RUNNING,
+        current_stage=Stage.PLAN,
+    )
+    state.upsert_task(settings.db_path, task)
+    change = ForgeChange(
+        number=7,
+        title="old foundry task",
+        branch="foundry/task-1",
+        url="https://github.com/owner/sandbox/pull/7",
+    )
+    provider = MagicMock()
+    provider.kind = ForgeKind.GITHUB
+    provider.list_changes.return_value = [change]
+    provider.load_feedback.return_value = ChangeFeedback(
+        failing_checks=(CheckResult("pipeline-1", "pipeline", "FAILED"),)
+    )
+
+    with patch("foundry.workflows.pr_feedback") as apply_feedback:
+        processed = workflows.pr_feedback_once(settings, provider)
+
+    assert processed == []
+    apply_feedback.assert_not_called()
 
 
 def test_pr_feedback_once_skips_prs_without_requested_changes_or_failing_ci(

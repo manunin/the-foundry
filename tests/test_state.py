@@ -52,6 +52,29 @@ def test_init_retries_transient_disk_io_error(
     assert sleeps == [0.2]
 
 
+def test_connect_retries_transient_commit_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    class FlakyConnection:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def commit(self) -> None:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(state.time, "sleep", sleeps.append)
+    conn = FlakyConnection()
+
+    state._commit_with_retry(conn)  # type: ignore[arg-type]
+
+    assert conn.attempts == 2
+    assert sleeps == [0.2]
+
+
 def test_upsert_insert_then_update(tmp_path: Path) -> None:
     db = tmp_path / "f.sqlite"
     state.init_db(db)

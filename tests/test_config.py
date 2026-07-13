@@ -38,6 +38,35 @@ def test_load_settings_defaults_base_branch_to_main(
     assert settings.base_branch == "main"
 
 
+def test_load_settings_parses_openspec_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("SOURCE_REPO", "owner/sandbox")
+    monkeypatch.setenv("TARGET_REPO", "owner/sandbox")
+    monkeypatch.setenv("FOUNDRY_OPENSPEC_MODE", "true")
+
+    settings = load_settings(env_path)
+
+    assert settings.openspec_mode is True
+
+
+def test_load_settings_rejects_invalid_openspec_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("SOURCE_REPO", "owner/sandbox")
+    monkeypatch.setenv("TARGET_REPO", "owner/sandbox")
+    monkeypatch.setenv("FOUNDRY_OPENSPEC_MODE", "sometimes")
+
+    with pytest.raises(ConfigError, match="FOUNDRY_OPENSPEC_MODE"):
+        load_settings(env_path)
+
+
 def test_load_settings_selects_self_managed_gitlab(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

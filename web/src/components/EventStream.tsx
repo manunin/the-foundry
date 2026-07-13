@@ -30,9 +30,24 @@ function getString(payload: Record<string, unknown>, key: string): string {
   return typeof v === "string" ? v : "";
 }
 
+function compactDisplayText(text: string): string {
+  return text
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function shouldRenderSpan(event: UiEvent, payload: Record<string, unknown>): boolean {
+  const spanType = getString(payload, "span_type");
+  if (event.kind === "agent_span_failed") {
+    return true;
+  }
+  return spanType !== "turn";
+}
+
 function ThinkingRow({ event }: { event: UiEvent }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const text = getString(event.payload, "text");
+  const text = compactDisplayText(getString(event.payload, "text"));
   const preview = text.length > 60 ? `${text.slice(0, 60)}…` : text;
   return (
     <div className="event-row">
@@ -70,8 +85,8 @@ function ThinkingRow({ event }: { event: UiEvent }): JSX.Element {
 
 function AgentResultRow({ event }: { event: UiEvent }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const summary = getString(event.payload, "summary");
-  const text = getString(event.payload, "text");
+  const summary = compactDisplayText(getString(event.payload, "summary"));
+  const text = compactDisplayText(getString(event.payload, "text"));
   const hasFullText = text.length > 0 && text !== summary;
   return (
     <div className="event-row">
@@ -132,6 +147,9 @@ function renderEvent(event: UiEvent): JSX.Element | null {
     event.kind === "agent_span_finished" ||
     event.kind === "agent_span_failed"
   ) {
+    if (!shouldRenderSpan(event, payload)) {
+      return null;
+    }
     const spanType = getString(payload, "span_type") || "span";
     const name = getString(payload, "name") || spanType;
     const duration = payload.duration_ms;
@@ -197,7 +215,7 @@ function renderEvent(event: UiEvent): JSX.Element | null {
   }
 
   if (event.kind === "agent_text") {
-    const text = getString(payload, "text");
+    const text = compactDisplayText(getString(payload, "text"));
     return (
       <div className="event-row" key={event.seq}>
         <span className="event-ico">💬</span>

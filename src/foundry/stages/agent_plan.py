@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from langfuse import observe
@@ -16,7 +17,10 @@ def run(task: Task, ctx: dict, worktree_path: Path, settings: Settings) -> dict:
 
     Returns {"plan": <full agent response>, "summary": <first line>}.
     """
-    agent = make_agent(AgentSettings.from_env(AgentStage.PLAN, db_path=settings.db_path))
+    agent_settings = AgentSettings.from_env(AgentStage.PLAN, db_path=settings.db_path)
+    if settings.openspec_mode:
+        agent_settings = replace(agent_settings, prompt_template="plan_openspec")
+    agent = make_agent(agent_settings)
     agent_task = AgentTask(
         id=task.id or task.issue_number,
         title=task.issue_title,

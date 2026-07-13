@@ -204,7 +204,18 @@ class GitHubProvider:
             state = str(check.get("conclusion") or check.get("status") or check.get("state") or "").upper()
             if state in failure_states:
                 name = str(check.get("name") or check.get("context") or check.get("workflowName") or "check")
-                checks.append(CheckResult(str(check.get("id") or f"{name}-{index}"), name, state))
+                url = check.get("detailsUrl") or check.get("targetUrl") or check.get("url")
+                workflow = check.get("workflowName")
+                details = f"workflow: {workflow}" if workflow else None
+                checks.append(
+                    CheckResult(
+                        str(check.get("id") or f"{name}-{index}"),
+                        name,
+                        state,
+                        str(url) if url else None,
+                        details,
+                    )
+                )
         return ChangeFeedback(tuple(items), tuple(checks))
 
     def comment_change(self, project: str, number: int, body: str) -> None:

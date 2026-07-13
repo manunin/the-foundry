@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Literal
@@ -13,10 +14,12 @@ from ..agents import AgentSettings, AgentStage, first_line
 from ..config import Settings
 from ..models import Task
 from . import agent_verify as agent_verify_stage
+from . import openspec
 
 log = structlog.get_logger()
 
 Verdict = Literal["PASS", "FAIL", "UNCLEAR"]
+MAX_AGENT_DIFF_BYTES = 80_000
 
 
 @observe(name="stage.verify")
@@ -47,6 +50,23 @@ def run(
         if settings.verify_commands is not None
         else [tuple(c) for c in _detect_verify_commands(worktree_path)]
     )
+    openspec_cmd = openspec.validate_command(worktree_path)
+    if settings.openspec_mode:
+        if openspec_cmd is None:
+            reason = (
+                openspec.MISSING_CLI_WARNING
+                if openspec.has_openspec(worktree_path)
+                else openspec.MISSING_FORCED_ARTIFACTS_WARNING
+            )
+            return _infra_result(
+                "openspec validate",
+                reason,
+                retryable=False,
+                requires_human=True,
+            )
+        openspec_tuple = tuple(openspec_cmd)
+        if openspec_tuple not in cmds:
+            cmds.append(openspec_tuple)
 
     det_outputs: list[dict] = []
     for cmd in cmds:
@@ -83,6 +103,13 @@ def run(
             return _deterministic_failure(det_outputs)
 
     det_summary = _format_summary(det_outputs)
+
+    if settings.openspec_mode and _openspec_validate_passed(det_outputs):
+        return {
+            "passed": True,
+            "report": "OpenSpec validation passed",
+            "stdout": det_summary,
+        }
 
     if not cmds and _agent_backend_is_stub(settings):
         log.warning("verify.no_checks_configured", task_id=task.id)
@@ -178,6 +205,9 @@ def _detect_verify_commands(worktree_path: Path) -> list[list[str]]:
 
     if (worktree_path / "Cargo.toml").exists():
         cmds.append(["cargo", "test"])
+    openspec_cmd = openspec.validate_command(worktree_path)
+    if openspec_cmd is not None:
+        cmds.append(openspec_cmd)
     return _dedupe_commands(cmds)
 
 
@@ -224,6 +254,13 @@ def _dedupe_commands(cmds: list[list[str]]) -> list[list[str]]:
     return out
 
 
+def _openspec_validate_passed(outputs: list[dict]) -> bool:
+    return any(
+        output["cmd"] == "openspec validate --all --json" and output["rc"] == 0
+        for output in outputs
+    )
+
+
 def _capture_diff(worktree_path: Path, max_bytes: int, timeout_sec: int) -> str:
     """Snapshot all working-tree changes (including untracked) as unified diff.
 
@@ -258,8 +295,9 @@ def _capture_diff(worktree_path: Path, max_bytes: int, timeout_sec: int) -> str:
             res.stdout,
             res.stderr,
         )
+    effective_max_bytes = min(max_bytes, MAX_AGENT_DIFF_BYTES)
     diff = res.stdout
-    if len(diff.encode("utf-8")) > max_bytes:
+    if len(diff.encode("utf-8")) > effective_max_bytes:
         stat = shell.run(
             ["git", "diff", "--stat"],
             cwd=worktree_path,
@@ -274,19 +312,33 @@ def _capture_diff(worktree_path: Path, max_bytes: int, timeout_sec: int) -> str:
                 stat.stderr,
             )
         diff = (
-            stat.stdout
-            + f"\n--- diff truncated, full body exceeded {max_bytes} bytes ---\n"
+            _truncate_utf8(stat.stdout, effective_max_bytes)
+            + "\n--- diff truncated, full body exceeded "
+            f"{effective_max_bytes} bytes ---\n"
         )
     return diff
 
 
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text
+    return raw[:max_bytes].decode("utf-8", errors="ignore")
+
+
 def _parse_verdict(response: str) -> Verdict:
-    line = first_line(response).strip()
+    line = _normalize_verdict_line(first_line(response))
     if line == "PASS":
         return "PASS"
     if line.startswith("FAIL"):
         return "FAIL"
     return "UNCLEAR"
+
+
+def _normalize_verdict_line(line: str) -> str:
+    normalized = line.strip()
+    normalized = re.sub(r"^[`*_~\s]+|[`*_~\s]+$", "", normalized)
+    return normalized
 
 
 def _agent_backend_is_stub(settings: Settings) -> bool:

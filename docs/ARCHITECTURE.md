@@ -105,7 +105,7 @@ uv run foundry run-issue <номер_issue>
 uv run foundry status              # таблица задач из БД
 uv run foundry reset <task_id>     # вернуть задачу в PENDING
 uv run foundry run-issue <number>  # запустить одну задачу вручную
-uv run foundry pr-feedback --once  # один проход по review/CI в открытых PR
+uv run foundry pr-feedback --once  # один проход по review/comment feedback в открытых PR
 uv run foundry pr-feedback         # continuous polling по открытым PR
 ```
 
@@ -115,6 +115,7 @@ uv run foundry pr-feedback         # continuous polling по открытым PR
 
 - **Агенты**: stub (оффлайн/тесты), claude_cli (Claude Code CLI), codex_cli (OpenAI Codex CLI), opencode_cli (OpenCode — DeepSeek, OpenAI, OpenRouter, OpenAI-compatible endpoints и др.)
 - **LLM**: Anthropic Claude (Haiku / Sonnet / Opus), OpenAI models через Codex CLI, DeepSeek/OpenRouter/Ollama и self-hosted OpenAI-compatible endpoints через OpenCode. Для OpenWebUI/OpenAI-compatible API Foundry передаёт OpenCode inline config через `OPENCODE_CONFIG_CONTENT` и не пишет provider config в task worktree.
+- **OpenSpec**: optional target-repo tooling. Если worktree содержит `openspec/` или `.codex/skills/openspec-*` и CLI доступен, CONTEXT добавляет `openspec status/instructions --json` в planner prompt, а VERIFY запускает `openspec validate --all --json` как deterministic gate. При `FOUNDRY_OPENSPEC_MODE=true` planner/implementer получают принудительные инструкции использовать OpenSpec proposal/tasks; IMPLEMENT стартует сразу после PLAN без human approval gate. `openspec init` не вызывается оркестратором.
 - **Трекер задач**: GitHub Issues (via `gh` CLI)
 - **Языки**: Python 3.11+ (backend + pipeline), TypeScript (frontend)
 - **Фреймворки**: FastAPI (HTTP API), Click (CLI), React 19 + Vite (UI), TanStack React Query
@@ -150,7 +151,7 @@ uv run foundry pr-feedback         # continuous polling по открытым PR
 - VERIFY вернул `PASS` (оба уровня)
 - `gh pr create` успешен → `task.pr_url` заполнен → `TaskStatus.DONE`
 
-**CI после PR**: `foundry pr-feedback` читает `statusCheckRollup` из GitHub API (`_view_pr_feedback` в `workflows.py`). Если CI упал — агент получает список failing checks и вносит правки на той же ветке.
+**CI после PR**: временно не обрабатывается `pr-feedback`. Агент реагирует на review/comment feedback; failing checks загружаются провайдерами, но не считаются actionable feedback.
 
 **Результат верификации через self-review**: агент-ревьюер (тот же backend, что и implementer, но с другим промптом) проверяет diff целиком — без знания о конкретных тестах. Это независимый взгляд на изменения.
 
@@ -178,7 +179,7 @@ uv run foundry pr-feedback         # continuous polling по открытым PR
 
 **Safe agent mode** (`SAFE_AGENT_MODE=true` по умолчанию): Claude CLI запускается без `--dangerously-skip-permissions`, Codex — без `--dangerously-bypass-approvals-and-sandbox`.
 
-**Защита от sandbox escape** (`stages/pr.py:_sanity_check_changes`): commit отказывает, если агент изменил более 40 файлов или затронул запрещённые пути (`__pycache__`, `.venv/` и т.п.).
+**Защита от sandbox escape** (`stages/pr.py:_sanity_check_changes`): commit отказывает, если агент изменил более 80 файлов или затронул запрещённые пути (`__pycache__`, `.venv/` и т.п.).
 
 **Ветка задачи**: PR всегда открывается из `foundry/task-{id}`, не из `main`.
 
@@ -191,13 +192,13 @@ uv run foundry pr-feedback         # continuous polling по открытым PR
 **Workflow `pr_feedback`** (`workflows.py:pr_feedback`, `pr_feedback_once`):
 
 1. `foundry pr-feedback` (или фоновый runner) вызывает `gh pr list` — все открытые `foundry/task-*` PR.
-2. Для каждого PR запрашивает через `gh pr view --json reviews,comments,statusCheckRollup`.
-3. `_format_pr_feedback` формирует feedback-блок из: запрошенных изменений (`CHANGES_REQUESTED`), failing CI checks, последних комментариев.
+2. Для каждого PR запрашивает review/comment feedback.
+3. `_format_pr_feedback` формирует feedback-блок из запрошенных изменений (`CHANGES_REQUESTED`) и последних комментариев. CI/CD checks временно игнорируются.
 4. Если feedback не пустой — агент получает промпт «Apply PR feedback» и вносит изменения прямо в ту же ветку (без нового PR).
 5. После применения изменений агент пушит на ту же ветку и публикует комментарий в PR: «Applied PR feedback (attempt N)».
 6. Завершение: `task.status = DONE` если верификация прошла, иначе ещё одна итерация.
 
-**CI мониторинг**: `statusCheckRollup` из GitHub API парсит conclusion (`FAILURE`, `TIMED_OUT`, `CANCELLED`, `ACTION_REQUIRED`) и передаёт агенту список упавших checks.
+**CI мониторинг**: временно отключён для `pr-feedback`; упавшие checks не запускают follow-up implement.
 
 **Дедупликация**: перед обработкой сохраняется хэш текущего feedback-блока в `repo_memory` (`pr_feedback_hash:{task_id}`). При следующем запуске, если хэш не изменился — PR пропускается.
 
@@ -319,7 +320,7 @@ run, retry attempts, backoff, turns и tools через monotonic clock. Код:
 - Задачи, требующие ручного UI-тестирования
 - Multi-repo задачи (изменения сразу в frontend и backend разных репо)
 - Задачи с deploy-зависимой верификацией (интеграционные тесты в staging)
-- Крупные рефакторинги с изменением более 40 файлов (ограничение `MAX_FILES_PER_PR`)
+- Крупные рефакторинги с изменением более 80 файлов (ограничение `MAX_FILES_PER_PR`)
 
 ---
 

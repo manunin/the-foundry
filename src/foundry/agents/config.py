@@ -43,6 +43,7 @@ class AgentSettings:
     safe_agent_mode: bool = True
     sandbox_mode: str | None = None
     opencode_openai: OpenCodeOpenAIConfig | None = None
+    prompt_template: str | None = None
 
     @classmethod
     def from_env(cls, stage: AgentStage, db_path: Path | None = None) -> AgentSettings:

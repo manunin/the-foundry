@@ -1,0 +1,371 @@
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+from .. import shell
+
+MAX_CONTEXT_CHARS = 4000
+MAX_SKILL_CHARS = 6000
+MISSING_CLI_WARNING = (
+    "openspec CLI not available; target repo artifacts were detected"
+)
+MISSING_FORCED_ARTIFACTS_WARNING = (
+    "FOUNDRY_OPENSPEC_MODE=true but no OpenSpec artifacts were detected; "
+    "initialize OpenSpec in the target repository first"
+)
+
+
+def has_openspec(root: Path) -> bool:
+    if (root / "openspec").is_dir():
+        return True
+    skills_dir = root / ".codex" / "skills"
+    return skills_dir.is_dir() and any(skills_dir.glob("openspec-*/SKILL.md"))
+
+
+def cli_available() -> bool:
+    return shutil.which("openspec") is not None
+
+
+def validate_command(root: Path) -> list[str] | None:
+    if not has_openspec(root) or not cli_available():
+        return None
+    return ["openspec", "validate", "--all", "--json"]
+
+
+def build_implementation_handoff(
+    root: Path,
+    timeout_sec: int,
+    *,
+    include_skill_bodies: bool = True,
+) -> str:
+    active_change = _active_change(root)
+    lines = [
+        "## OpenSpec implementation handoff",
+        "",
+        "FOUNDRY_OPENSPEC_MODE=true is enabled.",
+        "Use the OpenSpec artifacts in this worktree as the implementation source.",
+        "Do not use the planner transcript as a generic implementation plan.",
+        "Treat repository OpenSpec skills under `.codex/skills/` as read-only.",
+        "",
+    ]
+    if cli_available():
+        status = _run_json_command(
+            _change_command("status", active_change),
+            root=root,
+            timeout_sec=timeout_sec,
+        )
+        instructions = _run_json_command(
+            _change_command("instructions", active_change),
+            root=root,
+            timeout_sec=timeout_sec,
+        )
+        lines.append("### OpenSpec CLI")
+        if active_change:
+            lines.append(f"- Active change: `{active_change}`")
+        elif changes := _change_ids(root):
+            lines.append(
+                "- Active change was not inferred because multiple changes exist: "
+                + ", ".join(f"`{change}`" for change in changes)
+            )
+        lines.extend(
+            [
+                f"- `{status['cmd']}`: {_command_status(status)}",
+                f"  {status.get('summary', '')}",
+                f"- `{instructions['cmd']}`: {_command_status(instructions)}",
+                f"  {instructions.get('summary', '')}",
+                "",
+            ]
+        )
+    else:
+        lines.extend(["### OpenSpec CLI", f"- {MISSING_CLI_WARNING}", ""])
+
+    artifacts = _artifact_paths(root)
+    if artifacts:
+        lines.append("### OpenSpec artifacts")
+        lines.extend(f"- `{path}`" for path in artifacts)
+        lines.append("")
+
+    skills = _skill_docs(root) if include_skill_bodies else _skill_refs(root)
+    if skills:
+        lines.append("### Repository OpenSpec skills")
+        for item in skills:
+            if include_skill_bodies:
+                lines.append(f"#### `{item['path']}`")
+                lines.append(str(item["text"]))
+                lines.append("")
+            else:
+                lines.append(f"- `{item['path']}`")
+        if not include_skill_bodies:
+            lines.extend(
+                [
+                    "",
+                    "Read the relevant OpenSpec skill files from `.codex/skills/` "
+                    "before changing OpenSpec artifacts.",
+                    "",
+                ]
+            )
+
+    return "\n".join(lines).strip()
+
+
+def collect_context(
+    root: Path,
+    timeout_sec: int,
+    *,
+    forced: bool = False,
+) -> dict[str, object]:
+    if not has_openspec(root):
+        out: dict[str, object] = {"present": False}
+        if forced:
+            out["forced"] = True
+            out["warning"] = MISSING_FORCED_ARTIFACTS_WARNING
+        return out
+    if not cli_available():
+        return {
+            "present": True,
+            "forced": forced,
+            "cli_available": False,
+            "warning": MISSING_CLI_WARNING,
+            "skills": _skill_docs(root),
+        }
+
+    return {
+        "present": True,
+        "forced": forced,
+        "cli_available": True,
+        "skills": _skill_docs(root),
+        "commands": {
+            "status": _run_json_command(
+                ["openspec", "status", "--json"],
+                root=root,
+                timeout_sec=timeout_sec,
+            ),
+            "instructions": _run_json_command(
+                ["openspec", "instructions", "--json"],
+                root=root,
+                timeout_sec=timeout_sec,
+            ),
+        },
+    }
+
+
+def format_context(ctx: dict[str, object]) -> list[str]:
+    if not ctx.get("present") and not ctx.get("forced"):
+        return []
+
+    lines = ["### OpenSpec"]
+    if ctx.get("forced"):
+        lines.extend(
+            [
+                "- OpenSpec mode is enabled by `FOUNDRY_OPENSPEC_MODE=true`.",
+                "- OpenSpec mode is exclusive: PLAN must not produce a generic "
+                "implementation plan.",
+                "- PLAN must use repository OpenSpec skills, CLI output, and "
+                "artifacts to create or update a change proposal and tasks.",
+                "- PLAN must not implement product code directly.",
+                "- IMPLEMENT will run automatically after PLAN and must read "
+                "the OpenSpec artifacts instead of planner transcript text.",
+            ]
+        )
+    if not ctx.get("present"):
+        warning = str(ctx.get("warning") or "OpenSpec artifacts were not detected")
+        lines.append(f"- {warning}")
+        return lines
+
+    if not ctx.get("cli_available"):
+        warning = str(ctx.get("warning") or "openspec CLI not available")
+        lines.append(f"- {warning}")
+        _format_skills(ctx, lines)
+        return lines
+
+    commands = ctx.get("commands")
+    if not isinstance(commands, dict):
+        _format_skills(ctx, lines)
+        return lines
+
+    for name in ("status", "instructions"):
+        raw_result = commands.get(name)
+        if not isinstance(raw_result, dict):
+            continue
+        cmd = raw_result.get("cmd")
+        status = "ok" if raw_result.get("ok") else f"rc={raw_result.get('rc')}"
+        lines.append(f"- `{cmd}`: {status}")
+        summary = raw_result.get("summary")
+        if summary:
+            lines.append(f"  {summary}")
+    _format_skills(ctx, lines)
+    return lines
+
+
+def _format_skills(ctx: dict[str, object], lines: list[str]) -> None:
+    skills = ctx.get("skills")
+    if not isinstance(skills, list) or not skills:
+        return
+    lines.append("")
+    lines.append("### Repository OpenSpec skills")
+    for raw_item in skills:
+        if not isinstance(raw_item, dict):
+            continue
+        path = raw_item.get("path")
+        text = raw_item.get("text")
+        if path and text:
+            lines.append(f"#### `{path}`")
+            lines.append(str(text))
+
+
+def _command_status(result: dict[str, object]) -> str:
+    return "ok" if result.get("ok") else f"rc={result.get('rc')}"
+
+
+def _artifact_paths(root: Path) -> list[str]:
+    changes_dir = root / "openspec" / "changes"
+    if not changes_dir.is_dir():
+        return []
+    out: list[str] = []
+    for path in sorted(changes_dir.rglob("*")):
+        if path.is_file() and path.name in {
+            ".openspec.yaml",
+            "proposal.md",
+            "design.md",
+            "tasks.md",
+            "spec.md",
+            "README.md",
+        }:
+            out.append(path.relative_to(root).as_posix())
+    return out[:80]
+
+
+def _active_change(root: Path) -> str | None:
+    changes = _change_ids(root)
+    if len(changes) == 1:
+        return changes[0]
+    return None
+
+
+def _change_ids(root: Path) -> list[str]:
+    changes_dir = root / "openspec" / "changes"
+    if not changes_dir.is_dir():
+        return []
+    return sorted(
+        path.name
+        for path in changes_dir.iterdir()
+        if path.is_dir() and path.name != "archive"
+    )
+
+
+def _change_command(command: str, change: str | None) -> list[str]:
+    cmd = ["openspec", command]
+    if change:
+        cmd.extend(["--change", change])
+    cmd.append("--json")
+    return cmd
+
+
+def _skill_docs(root: Path) -> list[dict[str, str]]:
+    skills_dir = root / ".codex" / "skills"
+    if not skills_dir.is_dir():
+        return []
+    out: list[dict[str, str]] = []
+    for path in sorted(skills_dir.glob("openspec-*/SKILL.md")):
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if len(text) > MAX_SKILL_CHARS:
+            text = text[:MAX_SKILL_CHARS] + "..."
+        out.append({"path": path.relative_to(root).as_posix(), "text": text})
+    return out
+
+
+def _skill_refs(root: Path) -> list[dict[str, str]]:
+    skills_dir = root / ".codex" / "skills"
+    if not skills_dir.is_dir():
+        return []
+    return [
+        {"path": path.relative_to(root).as_posix(), "text": ""}
+        for path in sorted(skills_dir.glob("openspec-*/SKILL.md"))
+    ]
+
+
+def _run_json_command(
+    cmd: list[str],
+    *,
+    root: Path,
+    timeout_sec: int,
+) -> dict[str, object]:
+    try:
+        result = shell.run(
+            cmd,
+            cwd=root,
+            check=False,
+            timeout=timeout_sec,
+            env={**os.environ, "OPENSPEC_TELEMETRY": "0"},
+        )
+    except FileNotFoundError:
+        return _command_result(cmd, ok=False, rc=None, error="executable not found")
+    except subprocess.TimeoutExpired:
+        return _command_result(
+            cmd,
+            ok=False,
+            rc=None,
+            error=f"timeout after {timeout_sec}s",
+        )
+
+    data = _parse_json(result.stdout)
+    return _command_result(
+        cmd,
+        ok=result.ok,
+        rc=result.returncode,
+        data=data,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+
+
+def _command_result(
+    cmd: list[str],
+    *,
+    ok: bool,
+    rc: int | None,
+    data: object | None = None,
+    stdout: str = "",
+    stderr: str = "",
+    error: str | None = None,
+) -> dict[str, object]:
+    summary_source = data if data is not None else (error or stderr or stdout)
+    result: dict[str, object] = {
+        "cmd": " ".join(cmd),
+        "ok": ok,
+        "rc": rc,
+        "summary": _summarize(summary_source),
+    }
+    if data is not None:
+        result["data"] = data
+    if error:
+        result["error"] = error
+    return result
+
+
+def _parse_json(text: str) -> object | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+
+
+def _summarize(value: object) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    text = " ".join(text.split())
+    if len(text) <= MAX_CONTEXT_CHARS:
+        return text
+    return text[:MAX_CONTEXT_CHARS] + "..."

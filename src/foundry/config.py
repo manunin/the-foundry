@@ -31,12 +31,22 @@ class Settings:
     verify_commands: tuple[tuple[str, ...], ...] | None = None
     verify_command_timeout_sec: int = 300
     verify_diff_max_bytes: int = 200_000
+    openspec_mode: bool = False
     forge: ForgeKind = ForgeKind.GITHUB
     forge_host: str = "github.com"
 
 
 def _parse_csv(raw: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+def _parse_bool(raw: str, *, name: str) -> bool:
+    value = raw.strip().lower()
+    if value in {"", "0", "false", "no", "off"}:
+        return False
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    raise ConfigError(f"{name} must be a boolean value")
 
 
 def _parse_verify_commands(raw: str) -> tuple[tuple[str, ...], ...] | None:
@@ -121,6 +131,10 @@ def load_settings(env_path: Path | None = None) -> Settings:
             os.environ.get("VERIFY_COMMAND_TIMEOUT_SEC", "300")
         ),
         verify_diff_max_bytes=int(os.environ.get("VERIFY_DIFF_MAX_BYTES", "200000")),
+        openspec_mode=_parse_bool(
+            os.environ.get("FOUNDRY_OPENSPEC_MODE", ""),
+            name="FOUNDRY_OPENSPEC_MODE",
+        ),
         forge=forge,
         forge_host=forge_host,
     )

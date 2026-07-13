@@ -38,3 +38,37 @@ def test_build_fresh_prompt_loads_different_templates_per_stage() -> None:
     verify_prompt = build_fresh_prompt(AgentStage.VERIFY, task, input="")
 
     assert plan_prompt != verify_prompt
+
+
+def test_default_prompt_templates_do_not_include_openspec_mode_directives() -> None:
+    task = AgentTask(id=1, title="T", description="D")
+
+    plan_prompt = build_fresh_prompt(AgentStage.PLAN, task, input="")
+    implement_prompt = build_fresh_prompt(AgentStage.IMPLEMENT, task, input="")
+
+    assert "FOUNDRY_OPENSPEC_MODE=true" not in plan_prompt
+    assert "OpenSpec mode" not in plan_prompt
+    assert "FOUNDRY_OPENSPEC_MODE=true" not in implement_prompt
+    assert "OpenSpec mode" not in implement_prompt
+
+
+def test_build_fresh_prompt_can_use_openspec_templates() -> None:
+    task = AgentTask(id=1, title="T", description="D")
+
+    plan_prompt = build_fresh_prompt(
+        AgentStage.PLAN,
+        task,
+        input="FOUNDRY_OPENSPEC_MODE=true",
+        template_name="plan_openspec",
+    )
+    implement_prompt = build_fresh_prompt(
+        AgentStage.IMPLEMENT,
+        task,
+        input="handoff",
+        template_name="implement_openspec",
+    )
+
+    assert "OpenSpec planning agent" in plan_prompt
+    assert "parallel generic implementation plan" in plan_prompt
+    assert "OpenSpec implementation agent" in implement_prompt
+    assert "PLAN-stage narration" in implement_prompt

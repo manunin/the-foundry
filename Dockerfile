@@ -32,10 +32,12 @@ COPY --from=node_runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
 ARG INSTALL_CLAUDE_CLI=false
 ARG INSTALL_CODEX_CLI=false
 ARG INSTALL_OPENCODE_CLI=false
+ARG INSTALL_OPENSPEC_CLI=false
 
 RUN if [ "${INSTALL_CLAUDE_CLI}" = "true" ]; then npm install -g @anthropic-ai/claude-code; fi \
     && if [ "${INSTALL_CODEX_CLI}" = "true" ]; then npm install -g @openai/codex; fi \
-    && if [ "${INSTALL_OPENCODE_CLI}" = "true" ]; then npm install -g opencode-ai; fi
+    && if [ "${INSTALL_OPENCODE_CLI}" = "true" ]; then npm install -g opencode-ai; fi \
+    && if [ "${INSTALL_OPENSPEC_CLI}" = "true" ]; then npm install -g @fission-ai/openspec@latest; fi
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src

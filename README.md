@@ -46,6 +46,7 @@ failed/canceled pipeline текущего head SHA. При SSH clone/push кон
 | --- | --- | --- |
 | **Listener / pipeline** | [src/foundry/](src/foundry/) (entrypoint `foundry` CLI) | Поллит GitHub issue с заданным лейблом, прогоняет каждый через стадии, открывает PR и закрывает issue. Состояние — SQLite. |
 | **Coding agents** | [src/foundry/agents/](src/foundry/agents/) | Pluggable backends для стадий `plan`/`implement`/`verify`: `stub` (оффлайн, по умолчанию), `claude_cli`, `codex_cli`, `opencode_cli`. |
+| **Target-repo tooling** | [src/foundry/stages/](src/foundry/stages/) | Опционально читает OpenSpec-артефакты из target worktree и добавляет `openspec validate` в verify, если CLI доступен. |
 | **HTTP API** | [src/api/](src/api/) (FastAPI на `:8000`) | `/api/tasks`, `/api/tasks/{id}`, SSE на `/api/tasks/{id}/events`, `/api/repos`. |
 | **Web UI** | [web/](web/) (Vite + React + TS на `:5173`) | Список задач, раскрывающаяся карточка со stepper'ом и потоком событий агента. |
 
@@ -320,9 +321,29 @@ Compose монтирует локальный `gh` auth из `${HOME}/.config/gh
 INSTALL_CLAUDE_CLI=true docker compose build api worker
 INSTALL_CODEX_CLI=true docker compose build api worker
 INSTALL_OPENCODE_CLI=true docker compose build api worker
+INSTALL_OPENSPEC_CLI=true docker compose build api worker pr-feedback
 ```
 
 Для постоянного режима можно положить нужный флаг в `.env`, чтобы `docker compose up --build` тоже собирал образ с этим CLI. Если CLI уже лежит в собственном кастомном образе или используется только `CODING_AGENT=stub`, эти флаги не нужны.
+
+OpenSpec не является `CODING_AGENT`: агентом остаётся `claude_cli`, `codex_cli`,
+`opencode_cli` или `stub`. Если target repo уже содержит `openspec/` или
+`.codex/skills/openspec-*`, Foundry добавляет компактный вывод
+`openspec status --json` и `openspec instructions --json` в контекст PLAN, а на
+VERIFY запускает `openspec validate --all --json`. Интерактивный
+`openspec init` оркестратор не вызывает; инициализация OpenSpec остаётся на
+стороне target repo.
+
+Чтобы принудительно вести задачи через OpenSpec proposal/tasks, включи:
+
+```bash
+FOUNDRY_OPENSPEC_MODE=true
+```
+
+В этом режиме PLAN должен создать или обновить OpenSpec proposal/tasks, а
+IMPLEMENT сразу продолжает по этим задачам без отдельного human approval gate.
+Если target repo не содержит OpenSpec artifacts, Foundry заблокирует задачу на
+PLAN с просьбой сначала инициализировать OpenSpec.
 
 ---
 

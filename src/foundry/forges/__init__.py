@@ -11,6 +11,7 @@ from foundry.forges.base import (
     ForgeIssue,
     ForgeProvider,
     IssueQuery,
+    TRACK_CI_FEEDBACK,
 )
 from foundry.forges.github import GitHubProvider
 from foundry.forges.gitlab import GitLabProvider
@@ -26,5 +27,5 @@ def provider_for(settings: Settings) -> ForgeProvider:
 __all__ = [
     "ChangeFeedback", "ChangeRequestInput", "CheckResult", "FeedbackItem",
     "ForgeChange", "ForgeComment", "ForgeIssue", "ForgeKind", "ForgeProvider",
-    "IssueQuery", "provider_for",
+    "IssueQuery", "TRACK_CI_FEEDBACK", "provider_for",
 ]

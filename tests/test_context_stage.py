@@ -19,6 +19,18 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
+def _openspec_settings(tmp_path: Path) -> Settings:
+    return Settings(
+        source_repo="owner/sandbox",
+        target_repo="owner/sandbox",
+        issue_label="agent-task",
+        worktree_root=tmp_path / "worktrees",
+        db_path=tmp_path / "foundry.sqlite",
+        poll_interval_seconds=30,
+        openspec_mode=True,
+    )
+
+
 def _task() -> Task:
     return Task(
         repo="owner/sandbox",
@@ -75,6 +87,24 @@ def test_format_for_prompt_includes_context_sections() -> None:
             "repo_memory": [
                 {"repo": "owner/repo", "key": "verify_commands", "value": ["pytest -q"]}
             ],
+            "openspec": {
+                "present": True,
+                "cli_available": True,
+                "commands": {
+                    "status": {
+                        "cmd": "openspec status --json",
+                        "ok": True,
+                        "rc": 0,
+                        "summary": '{"change":"add-api"}',
+                    },
+                    "instructions": {
+                        "cmd": "openspec instructions --json",
+                        "ok": True,
+                        "rc": 0,
+                        "summary": '{"next":["write tasks"]}',
+                    },
+                },
+            },
         }
     )
 
@@ -82,5 +112,40 @@ def test_format_for_prompt_includes_context_sections() -> None:
     assert "`pyproject.toml`" in prompt
     assert "`pytest -q`" in prompt
     assert "`src/foundry/stages/context.py`" in prompt
+    assert "### OpenSpec" in prompt
+    assert "`openspec status --json`: ok" in prompt
+    assert "write tasks" in prompt
     assert "### Repo memory" in prompt
     assert "`verify_commands`" in prompt
+
+
+def test_format_for_prompt_includes_openspec_missing_cli_warning() -> None:
+    prompt = context.format_for_prompt(
+        {
+            "openspec": {
+                "present": True,
+                "cli_available": False,
+                "warning": "openspec CLI not available; target repo artifacts were "
+                "detected",
+            }
+        }
+    )
+
+    assert "### OpenSpec" in prompt
+    assert "openspec CLI not available" in prompt
+
+
+def test_context_stage_marks_forced_openspec_missing_artifacts(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    out = context.run(_task(), _openspec_settings(tmp_path), repo_path=repo)
+
+    assert out["openspec"]["forced"] is True
+    assert out["openspec"]["present"] is False
+
+    prompt = context.format_for_prompt(out)
+    assert "FOUNDRY_OPENSPEC_MODE=true" in prompt
+    assert "no OpenSpec artifacts" in prompt

@@ -8,6 +8,7 @@ from pathlib import Path
 from .. import state
 from ..config import Settings
 from ..models import Task
+from . import openspec
 
 SKIP_DIRS = {
     ".git",
@@ -119,6 +120,11 @@ def run(
     keywords = _issue_keywords(task)
     relevant_files = _relevant_files(root, files, keywords)
     test_commands = _test_commands(root, settings, manifests)
+    openspec_context = openspec.collect_context(
+        root,
+        timeout_sec=settings.verify_command_timeout_sec,
+        forced=settings.openspec_mode,
+    )
     state.init_db(settings.db_path)
     repo_memory = state.list_repo_memory(settings.db_path, task.repo)
 
@@ -130,6 +136,7 @@ def run(
         "test_commands": test_commands,
         "keywords": keywords,
         "relevant_files": relevant_files,
+        "openspec": openspec_context,
         "repo_memory": repo_memory,
         "files": [f["path"] for f in relevant_files],
     }
@@ -161,6 +168,10 @@ def format_for_prompt(ctx: dict) -> str:
             matched = ", ".join(item.get("matched_keywords", []))
             suffix = f" ({matched})" if matched else ""
             lines.append(f"- `{item['path']}`{suffix}")
+        lines.append("")
+    openspec_lines = openspec.format_context(ctx.get("openspec", {}))
+    if openspec_lines:
+        lines.extend(openspec_lines)
         lines.append("")
     if ctx.get("repo_memory"):
         lines.append("### Repo memory")

@@ -106,6 +106,24 @@ def test_detect_no_markers_returns_empty(tmp_path: Path) -> None:
     assert verify_stage._detect_verify_commands(tmp_path) == []
 
 
+def test_detect_openspec_appends_validate_when_cli_available(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
+    (tmp_path / "openspec").mkdir()
+
+    with patch.object(verify_stage.openspec, "cli_available", return_value=True):
+        assert verify_stage._detect_verify_commands(tmp_path) == [
+            ["uv", "run", "ruff", "check", "."],
+            ["openspec", "validate", "--all", "--json"],
+        ]
+
+
+def test_detect_openspec_skips_validate_when_cli_missing(tmp_path: Path) -> None:
+    (tmp_path / "openspec").mkdir()
+
+    with patch.object(verify_stage.openspec, "cli_available", return_value=False):
+        assert verify_stage._detect_verify_commands(tmp_path) == []
+
+
 def test_detect_package_json(tmp_path: Path) -> None:
     (tmp_path / "package.json").write_text(
         '{"scripts":{"build":"vite build","lint":"eslint .","test":"vitest"}}'
@@ -161,11 +179,14 @@ def test_detect_installs_all_npm_packages_before_running_scripts(
 
 def test_parse_verdict_pass() -> None:
     assert verify_stage._parse_verdict("PASS\nall good") == "PASS"
+    assert verify_stage._parse_verdict("**PASS**\nall good") == "PASS"
+    assert verify_stage._parse_verdict("`PASS`\nall good") == "PASS"
 
 
 def test_parse_verdict_fail() -> None:
     assert verify_stage._parse_verdict("FAIL: missing test") == "FAIL"
     assert verify_stage._parse_verdict("FAIL\ndetails") == "FAIL"
+    assert verify_stage._parse_verdict("**FAIL:** missing test") == "FAIL"
 
 
 def test_parse_verdict_unclear() -> None:
@@ -434,6 +455,64 @@ def test_verify_commands_env_replaces_autodetect(tmp_path: Path) -> None:
     assert det_cmds == [["true"]]
 
 
+def test_forced_openspec_appends_validate_and_skips_agent(tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    settings = _settings(
+        tmp_path,
+        verify_commands=(("true",),),
+        openspec_mode=True,
+    )
+    seen_cmds: list[list[str]] = []
+
+    def _run(cmd, **kw):
+        seen_cmds.append(list(cmd))
+        return _ok("{}")
+
+    with patch.object(
+        verify_stage.openspec,
+        "validate_command",
+        return_value=["openspec", "validate", "--all", "--json"],
+    ), patch.object(verify_stage.shell, "run", side_effect=_run), patch.object(
+        verify_stage.agent_verify_stage, "run"
+    ) as agent_mock:
+        result = verify_stage.run(_task(), wt, settings)
+
+    assert result["passed"] is True
+    assert result["report"] == "OpenSpec validation passed"
+    assert "true \u2192 ok" in result["stdout"]
+    assert "openspec validate --all --json \u2192 ok" in result["stdout"]
+    assert [cmd for cmd in seen_cmds if cmd[0] != "git"] == [
+        ["true"],
+        ["openspec", "validate", "--all", "--json"],
+    ]
+    agent_mock.assert_not_called()
+
+
+def test_forced_openspec_requires_validate_command(tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    settings = _settings(tmp_path, verify_commands=(("true",),), openspec_mode=True)
+
+    with patch.object(
+        verify_stage.openspec, "validate_command", return_value=None
+    ), patch.object(
+        verify_stage.openspec, "has_openspec", return_value=True
+    ), patch.object(
+        verify_stage.shell, "run"
+    ) as shell_mock, patch.object(
+        verify_stage.agent_verify_stage, "run"
+    ) as agent_mock:
+        result = verify_stage.run(_task(), wt, settings)
+
+    assert result["passed"] is False
+    assert result["failure_kind"] == "infra"
+    assert result["requires_human"] is True
+    assert "openspec CLI not available" in result["report"]
+    shell_mock.assert_not_called()
+    agent_mock.assert_not_called()
+
+
 def test_diff_truncation_replaces_with_stat(tmp_path: Path) -> None:
     wt = tmp_path / "wt"
     wt.mkdir()
@@ -464,6 +543,43 @@ def test_diff_truncation_replaces_with_stat(tmp_path: Path) -> None:
     assert "5000 insertions" in captured["diff"]
     assert "diff truncated" in captured["diff"]
     assert big_diff not in captured["diff"]
+
+
+def test_diff_truncation_uses_safe_agent_argument_cap(tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    settings = _settings(
+        tmp_path,
+        verify_commands=(("true",),),
+        verify_diff_max_bytes=verify_stage.MAX_AGENT_DIFF_BYTES * 10,
+    )
+
+    big_diff = "+" * (verify_stage.MAX_AGENT_DIFF_BYTES + 1)
+    captured: dict = {}
+
+    def _run(cmd, **kw):
+        if cmd[0] == "true":
+            return _ok()
+        if cmd[:2] == ["git", "add"]:
+            return _ok()
+        if cmd[:3] == ["git", "diff", "--stat"]:
+            return _ok(" 1 file changed, many insertions(+)\n")
+        if cmd[:2] == ["git", "diff"]:
+            return _ok(big_diff)
+        return _ok()
+
+    def _agent_run(task, worktree, diff_text, settings):
+        captured["diff"] = diff_text
+        return {"response": "PASS", "result": "PASS"}
+
+    with patch.object(verify_stage.shell, "run", side_effect=_run), \
+         patch.object(verify_stage.agent_verify_stage, "run", side_effect=_agent_run):
+        verify_stage.run(_task(), wt, settings)
+
+    assert "many insertions" in captured["diff"]
+    assert "diff truncated" in captured["diff"]
+    assert big_diff not in captured["diff"]
+    assert len(captured["diff"].encode("utf-8")) < verify_stage.MAX_AGENT_DIFF_BYTES
 
 
 def test_no_checks_configured_passes_with_warning(tmp_path: Path) -> None:

@@ -18,7 +18,12 @@ from foundry.workflows import (
 )
 
 
-def _settings(tmp_path: Path, *, max_implement_attempts: int = 2) -> Settings:
+def _settings(
+    tmp_path: Path,
+    *,
+    max_implement_attempts: int = 2,
+    openspec_mode: bool = False,
+) -> Settings:
     return Settings(
         source_repo="owner/sandbox",
         target_repo="owner/sandbox",
@@ -27,6 +32,7 @@ def _settings(tmp_path: Path, *, max_implement_attempts: int = 2) -> Settings:
         db_path=tmp_path / "foundry.sqlite",
         poll_interval_seconds=30,
         max_implement_attempts=max_implement_attempts,
+        openspec_mode=openspec_mode,
     )
 
 
@@ -433,6 +439,164 @@ def test_dev_task_unclear_plan_comments_and_blocks(tmp_path: Path) -> None:
     assert comments
     assert "Please clarify the desired API shape." in comments[0]
     assert "NEED_VERIFICATION" not in comments[0]
+
+
+def test_dev_task_forced_openspec_missing_setup_blocks_before_plan(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path, openspec_mode=True)
+    state.init_db(settings.db_path)
+    seeded = _seed_task(settings.db_path)
+    comments: list[str] = []
+
+    ctxs = [
+        patch("foundry.pipeline.fetch_stage.fetch", return_value=[seeded]),
+        patch("foundry.workflows.worktree.ensure_base_repo", return_value=tmp_path / "base"),
+        patch(
+            "foundry.workflows.worktree.create_worktree",
+            return_value=(tmp_path / "wt", "foundry/task-1"),
+        ),
+        patch(
+            "foundry.workflows.context_stage.run",
+            return_value={"openspec": {"present": False, "forced": True}},
+        ),
+        patch(
+            "foundry.workflows.agent_plan_stage.run",
+            side_effect=AssertionError("plan should not run"),
+        ),
+        patch(
+            "foundry.workflows.agent_implement_stage.run",
+            side_effect=AssertionError("implement should not run"),
+        ),
+        patch(
+            "foundry.workflows.issue_comment_stage.run",
+            side_effect=lambda task, settings, body, cwd=None, provider=None: comments.append(body)
+            or {"issue_number": task.issue_number, "comment": body},
+        ),
+    ]
+    _start(ctxs)
+    try:
+        processed = pipeline.run_once(settings)
+    finally:
+        _stop(ctxs)
+
+    final = state.get_task(settings.db_path, processed[0].id)
+    assert final.status == TaskStatus.BLOCKED
+    assert final.current_stage == Stage.PLAN
+    assert "FOUNDRY_OPENSPEC_MODE=true" in comments[0]
+    assert "Initialize OpenSpec" in comments[0]
+
+
+def test_dev_task_forced_openspec_with_artifacts_continues_to_implement(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path, openspec_mode=True)
+    state.init_db(settings.db_path)
+    seeded = _seed_task(settings.db_path)
+    implement_calls: list[dict] = []
+
+    def _implement_run(task, plan, worktree_path, settings):
+        implement_calls.append(plan)
+        return {"result": "implemented", "response": "implemented"}
+
+    ctxs = [
+        patch("foundry.pipeline.fetch_stage.fetch", return_value=[seeded]),
+        *[patch(target, **kwargs) for target, kwargs in _dev_task_patches(tmp_path).items()],
+        patch(
+            "foundry.workflows.context_stage.run",
+            return_value={"openspec": {"present": True, "forced": True}},
+        ),
+        patch("foundry.workflows.agent_implement_stage.run", side_effect=_implement_run),
+        patch(
+            "foundry.workflows.verify_stage.run",
+            return_value={"passed": True, "report": "green"},
+        ),
+    ]
+    _start(ctxs)
+    try:
+        processed = pipeline.run_once(settings)
+    finally:
+        _stop(ctxs)
+
+    final = state.get_task(settings.db_path, processed[0].id)
+    assert final.status == TaskStatus.DONE
+    assert final.pr_url == "https://example/pr/1"
+    assert len(implement_calls) == 1
+    events = read_events(settings.db_path, task_id=final.id)
+    plan_started = [
+        e for e in events if e.stage == "plan" and e.kind == "stage_started"
+    ]
+    assert "OpenSpec planning agent" in plan_started[0].payload["input"]["prompt"]
+    assert "Этап 1" not in plan_started[0].payload["input"]["prompt"]
+    implement_started = [
+        e for e in events if e.stage == "implement" and e.kind == "stage_started"
+    ]
+    assert "OpenSpec implementation agent" in implement_started[0].payload["input"]["prompt"]
+
+
+def test_dev_task_forced_openspec_retry_includes_previous_verify_report(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path, openspec_mode=True, max_implement_attempts=2)
+    state.init_db(settings.db_path)
+    seeded = _seed_task(settings.db_path)
+    implement_calls: list[dict] = []
+
+    def _implement_run(task, plan, worktree_path, settings):
+        implement_calls.append(plan)
+        return {"result": f"implemented-{len(implement_calls)}", "response": ""}
+
+    verify_results = iter(
+        [
+            {
+                "passed": False,
+                "retryable": True,
+                "requires_human": False,
+                "failure_kind": "deterministic",
+                "report": "Change must have at least one delta",
+            },
+            {"passed": True, "report": "green"},
+        ]
+    )
+
+    ctxs = [
+        patch("foundry.pipeline.fetch_stage.fetch", return_value=[seeded]),
+        *[patch(target, **kwargs) for target, kwargs in _dev_task_patches(tmp_path).items()],
+        patch(
+            "foundry.workflows.context_stage.run",
+            return_value={"openspec": {"present": True, "forced": True}},
+        ),
+        patch(
+            "foundry.workflows.openspec.build_implementation_handoff",
+            return_value="## OpenSpec implementation handoff",
+        ),
+        patch("foundry.workflows.agent_implement_stage.run", side_effect=_implement_run),
+        patch(
+            "foundry.workflows.verify_stage.run",
+            side_effect=lambda *a, **kw: next(verify_results),
+        ),
+    ]
+    _start(ctxs)
+    try:
+        processed = pipeline.run_once(settings)
+    finally:
+        _stop(ctxs)
+
+    final = state.get_task(settings.db_path, processed[0].id)
+    assert final.status == TaskStatus.DONE
+    assert len(implement_calls) == 2
+    assert implement_calls[1]["_previous_verification_report"] == (
+        "Change must have at least one delta"
+    )
+
+    events = read_events(settings.db_path, task_id=final.id)
+    implement_started = [
+        e for e in events if e.stage == "implement" and e.kind == "stage_started"
+    ]
+    retry_prompt = implement_started[1].payload["input"]["prompt"]
+    assert "OpenSpec implementation handoff" in retry_prompt
+    assert "Previous verification report" in retry_prompt
+    assert "Change must have at least one delta" in retry_prompt
 
 
 def test_dev_task_unclear_implement_comments_and_blocks(tmp_path: Path) -> None:

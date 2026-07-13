@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import MagicMock
 
 from foundry.forges import ForgeChange, IssueQuery
 from foundry.forges.gitlab import GitLabProvider
@@ -29,6 +30,45 @@ def test_gitlab_encodes_nested_project_and_maps_string_labels(monkeypatch) -> No
     assert "labels=agent-task%2Cqueue%2Fbackend" in commands[0][-1]
 
 
+def test_gitlab_http_host_uses_direct_api_without_glab(monkeypatch) -> None:
+    monkeypatch.setenv("GITLAB_HOST", "http://gitlab.example")
+    monkeypatch.setenv("GITLAB_TOKEN", "token")
+    response = MagicMock()
+    response.__enter__.return_value.read.return_value = json.dumps([
+        {
+            "iid": 4,
+            "title": "Fix",
+            "description": "Body",
+            "labels": ["agent-task"],
+            "web_url": "http://gitlab.example/group/repo/-/issues/4",
+        }
+    ]).encode()
+    requests = []
+
+    def fake_urlopen(request, timeout: int):
+        requests.append(request)
+        assert timeout == 30
+        return response
+
+    monkeypatch.setattr("foundry.forges.gitlab.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "foundry.forges.base.shell.run",
+        lambda cmd, **kwargs: (_ for _ in ()).throw(AssertionError("glab called")),
+    )
+
+    issues = GitLabProvider("gitlab.example").list_issues(
+        "group/repo",
+        IssueQuery(("agent-task",), limit=50),
+    )
+
+    assert issues[0].number == 4
+    assert requests[0].full_url == (
+        "http://gitlab.example/api/v4/projects/group%2Frepo/issues"
+        "?state=opened&per_page=50&page=1&labels=agent-task"
+    )
+    assert requests[0].headers["Private-token"] == "token"
+
+
 def test_gitlab_feedback_uses_unresolved_discussions_and_current_sha(
     monkeypatch,
 ) -> None:
@@ -38,6 +78,10 @@ def test_gitlab_feedback_uses_unresolved_discussions_and_current_sha(
                 "id": 10, "body": "Add a test", "resolvable": True,
                 "resolved": False, "system": False,
                 "author": {"username": "reviewer"},
+                "position": {
+                    "new_path": "openspec/changes/digital-ruble-xml-over-http/tasks.md",
+                    "new_line": 12,
+                },
             }]},
             {"id": "thread-2", "notes": [{
                 "id": 11, "body": "Already fixed", "resolvable": True,
@@ -45,14 +89,40 @@ def test_gitlab_feedback_uses_unresolved_discussions_and_current_sha(
             }]},
         ],
         [
-            {"id": 20, "sha": "old", "status": "failed"},
-            {"id": 21, "sha": "head", "status": "canceled"},
+            {"id": 20, "sha": "old", "status": "failed", "web_url": "old-url"},
+            {
+                "id": 21,
+                "sha": "head",
+                "status": "canceled",
+                "web_url": "https://gitlab.example/pipelines/21",
+            },
             {"id": 22, "sha": "head", "status": "running"},
         ],
+        [
+            {
+                "id": 31,
+                "name": "pytest",
+                "status": "failed",
+                "stage": "test",
+                "failure_reason": "script_failure",
+                "web_url": "https://gitlab.example/jobs/31",
+            },
+            {
+                "id": 32,
+                "name": "ruff",
+                "status": "canceled",
+                "stage": "lint",
+                "web_url": "https://gitlab.example/jobs/32",
+            },
+        ],
+        "Compiling module\n[ERROR] cannot find symbol Foo\nJob failed",
+        "Running tests\nAssertionError: expected 1 got 2\nJob failed",
     ])
 
     def fake_run(cmd: list[str], **kwargs) -> Result:
-        return Result(0, json.dumps(next(responses)), "")
+        response = next(responses)
+        stdout = response if isinstance(response, str) else json.dumps(response)
+        return Result(0, stdout, "")
 
     monkeypatch.setattr("foundry.forges.base.shell.run", fake_run)
     feedback = GitLabProvider().load_feedback(
@@ -61,8 +131,22 @@ def test_gitlab_feedback_uses_unresolved_discussions_and_current_sha(
     )
 
     assert [item.external_id for item in feedback.items] == ["10"]
+    assert feedback.items[0].location == (
+        "openspec/changes/digital-ruble-xml-over-http/tasks.md:12"
+    )
     assert [check.external_id for check in feedback.failing_checks] == ["21"]
-    assert "Add a test" in feedback.format()
+    assert feedback.failing_checks[0].url == "https://gitlab.example/pipelines/21"
+    assert feedback.failing_checks[0].details is not None
+    assert "pytest: FAILED in stage `test`" in feedback.failing_checks[0].details
+    assert "pytest trace excerpt:" in feedback.failing_checks[0].details
+    assert "[ERROR] cannot find symbol Foo" in feedback.failing_checks[0].details
+    assert "ruff trace excerpt:" in feedback.failing_checks[0].details
+    assert "AssertionError: expected 1 got 2" in feedback.failing_checks[0].details
+    assert "https://gitlab.example/jobs/31" in feedback.format()
+    assert (
+        "- reviewer on `openspec/changes/digital-ruble-xml-over-http/tasks.md:12`: "
+        "Add a test"
+    ) in feedback.format()
 
 
 def test_gitlab_maps_issue_comments_and_skips_system_notes(monkeypatch) -> None:

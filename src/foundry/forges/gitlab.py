@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
+import os
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
 
 from foundry.forges.base import (
     ChangeFeedback,
@@ -19,12 +23,16 @@ from foundry.forges.base import (
 )
 from foundry.models import ForgeKind
 
+MAX_JOB_TRACE_CHARS = 6000
+MAX_JOB_TRACE_LINES = 80
+
 
 class GitLabProvider:
     kind = ForgeKind.GITLAB
 
     def __init__(self, host: str = "gitlab.com") -> None:
         self.host = host
+        self.api_base_url = _api_base_url(host)
 
     def _api(
         self,
@@ -33,6 +41,8 @@ class GitLabProvider:
         method: str = "GET",
         fields: dict[str, str] | None = None,
     ) -> object:
+        if self.api_base_url.startswith("http://"):
+            return self._http_api(endpoint, method=method, fields=fields)
         cmd = ["glab", "api", "--hostname", self.host, "--method", method, endpoint]
         for key, value in (fields or {}).items():
             cmd.extend(["--raw-field", f"{key}={value}"])
@@ -41,6 +51,72 @@ class GitLabProvider:
             operation=f"{method} {endpoint.split('?')[0]}",
             project=endpoint,
         )
+
+    def _http_api(
+        self,
+        endpoint: str,
+        *,
+        method: str,
+        fields: dict[str, str] | None,
+    ) -> object:
+        url = f"{self.api_base_url}/api/v4{endpoint}"
+        data = None
+        headers = {"Accept": "application/json"}
+        token = os.environ.get("GITLAB_TOKEN", "").strip()
+        if token:
+            headers["PRIVATE-TOKEN"] = token
+        if fields:
+            data = urlencode(fields).encode()
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+        request = Request(url, data=data, headers=headers, method=method)
+        try:
+            with urlopen(request, timeout=30) as response:
+                payload = response.read().decode()
+        except HTTPError as exc:
+            body = exc.read().decode(errors="replace")
+            raise ForgeError(
+                f"{method} {endpoint.split('?')[0]} returned HTTP {exc.code}: {body}"
+            ) from exc
+        except URLError as exc:
+            raise ForgeError(
+                f"{method} {endpoint.split('?')[0]} failed: {exc.reason}"
+            ) from exc
+        if not payload.strip():
+            raise ForgeError(f"{method} {endpoint.split('?')[0]} returned empty JSON")
+        try:
+            return json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise ForgeError(
+                f"{method} {endpoint.split('?')[0]} returned malformed JSON"
+            ) from exc
+
+    def _raw_api(self, endpoint: str) -> str:
+        if self.api_base_url.startswith("http://"):
+            return self._http_raw_api(endpoint)
+        result = run_with_retry(
+            ["glab", "api", "--hostname", self.host, "--method", "GET", endpoint]
+        )
+        return result.stdout
+
+    def _http_raw_api(self, endpoint: str) -> str:
+        url = f"{self.api_base_url}/api/v4{endpoint}"
+        headers = {"Accept": "text/plain"}
+        token = os.environ.get("GITLAB_TOKEN", "").strip()
+        if token:
+            headers["PRIVATE-TOKEN"] = token
+        request = Request(url, headers=headers, method="GET")
+        try:
+            with urlopen(request, timeout=30) as response:
+                return response.read().decode(errors="replace")
+        except HTTPError as exc:
+            body = exc.read().decode(errors="replace")
+            raise ForgeError(
+                f"GET {endpoint.split('?')[0]} returned HTTP {exc.code}: {body}"
+            ) from exc
+        except URLError as exc:
+            raise ForgeError(
+                f"GET {endpoint.split('?')[0]} failed: {exc.reason}"
+            ) from exc
 
     @staticmethod
     def _project(project: str) -> str:
@@ -213,6 +289,7 @@ class GitLabProvider:
                 if not note.get("resolvable") or note.get("resolved") or note.get("system"):
                     continue
                 author = note.get("author") or {}
+                file_path, line = _discussion_location(discussion, note)
                 items.append(
                     FeedbackItem(
                         str(note.get("id") or discussion.get("id")),
@@ -220,6 +297,8 @@ class GitLabProvider:
                         str(author.get("username") or "unknown")
                         if isinstance(author, dict)
                         else "unknown",
+                        file_path,
+                        line,
                     )
                 )
         checks: list[CheckResult] = []
@@ -233,12 +312,49 @@ class GitLabProvider:
                 and change.head_sha
                 and sha == change.head_sha
             ):
+                pipeline_id = str(pipeline.get("id") or sha)
+                jobs = self._failed_pipeline_jobs(project, pipeline_id)
+                details = _format_failed_jobs(jobs)
                 checks.append(
                     CheckResult(
-                        str(pipeline.get("id") or sha), "pipeline", state.upper()
+                        pipeline_id,
+                        "pipeline",
+                        state.upper(),
+                        str(pipeline.get("web_url") or "") or None,
+                        details,
                     )
                 )
         return ChangeFeedback(tuple(items), tuple(checks))
+
+    def _failed_pipeline_jobs(
+        self,
+        project: str,
+        pipeline_id: str,
+    ) -> list[dict[str, object]]:
+        endpoint = (
+            f"/projects/{self._project(project)}/pipelines/{pipeline_id}/jobs"
+            "?scope[]=failed&scope[]=canceled&scope[]=manual"
+        )
+        jobs: list[dict[str, object]] = []
+        try:
+            values = self._paged(endpoint)
+        except ForgeError:
+            return jobs
+        for value in values:
+            if isinstance(value, dict):
+                job_id = value.get("id")
+                if job_id:
+                    value["trace_excerpt"] = self._job_trace_excerpt(project, str(job_id))
+                jobs.append(value)
+        return jobs
+
+    def _job_trace_excerpt(self, project: str, job_id: str) -> str | None:
+        endpoint = f"/projects/{self._project(project)}/jobs/{job_id}/trace"
+        try:
+            trace = self._raw_api(endpoint)
+        except ForgeError:
+            return None
+        return _trace_excerpt(trace)
 
     def comment_change(self, project: str, number: int, body: str) -> None:
         self._api(
@@ -255,3 +371,74 @@ def _timestamp_ms(value: object, project: str) -> int:
             f"issue comment has invalid timestamp for {project}"
         ) from exc
     return int(timestamp.timestamp() * 1000)
+
+
+def _discussion_location(
+    discussion: dict[str, object],
+    note: dict[str, object],
+) -> tuple[str | None, int | None]:
+    position = note.get("position") or discussion.get("position")
+    if not isinstance(position, dict):
+        return None, None
+
+    raw_path = position.get("new_path") or position.get("old_path")
+    file_path = str(raw_path) if raw_path else None
+    line = _line_number(position.get("new_line") or position.get("old_line"))
+    return file_path, line
+
+
+def _line_number(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_failed_jobs(jobs: list[dict[str, object]]) -> str | None:
+    if not jobs:
+        return None
+    lines: list[str] = []
+    for job in jobs[:10]:
+        name = str(job.get("name") or "job")
+        status = str(job.get("status") or "unknown").upper()
+        stage = str(job.get("stage") or "").strip()
+        reason = str(job.get("failure_reason") or "").strip()
+        url = str(job.get("web_url") or "").strip()
+        details = f"{name}: {status}"
+        if stage:
+            details += f" in stage `{stage}`"
+        if reason:
+            details += f"; reason: {reason}"
+        if url:
+            details += f"; url: {url}"
+        lines.append(details)
+        trace_excerpt = str(job.get("trace_excerpt") or "").strip()
+        if trace_excerpt:
+            lines.append(f"{name} trace excerpt:\n{trace_excerpt}")
+    if len(jobs) > 10:
+        lines.append(f"... and {len(jobs) - 10} more failing jobs")
+    return "\n".join(lines)
+
+
+def _trace_excerpt(trace: str) -> str | None:
+    lines = [line.rstrip() for line in trace.splitlines() if line.strip()]
+    if not lines:
+        return None
+    selected = lines[-MAX_JOB_TRACE_LINES:]
+    text = "\n".join(selected).strip()
+    if len(text) <= MAX_JOB_TRACE_CHARS:
+        return text
+    return text[-MAX_JOB_TRACE_CHARS:].lstrip()
+
+
+def _api_base_url(host: str) -> str:
+    raw_host = (
+        os.environ.get("GITLAB_HOST")
+        or os.environ.get("GL_HOST")
+        or host
+    ).strip().rstrip("/")
+    if raw_host.startswith(("http://", "https://")):
+        return raw_host
+    return f"https://{host.strip().rstrip('/')}"

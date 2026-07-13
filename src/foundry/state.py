@@ -75,6 +75,10 @@ CREATE TABLE IF NOT EXISTS repo_memory (
 
 _INIT_DB_MAX_ATTEMPTS = 5
 _INIT_DB_RETRY_DELAY_SECONDS = 0.2
+_DB_TIMEOUT_SECONDS = 30.0
+_DB_BUSY_TIMEOUT_MS = int(_DB_TIMEOUT_SECONDS * 1000)
+_DB_COMMIT_MAX_ATTEMPTS = 5
+_DB_COMMIT_RETRY_DELAY_SECONDS = 0.2
 
 
 def init_db(db_path: Path) -> None:
@@ -82,6 +86,7 @@ def init_db(db_path: Path) -> None:
     for attempt in range(_INIT_DB_MAX_ATTEMPTS):
         try:
             with _connect(db_path) as conn:
+                conn.execute("PRAGMA journal_mode=WAL")
                 conn.executescript(SCHEMA)
                 _migrate_tasks(conn)
             return
@@ -115,13 +120,28 @@ def _migrate_tasks(conn: sqlite3.Connection) -> None:
 
 @contextmanager
 def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=_DB_TIMEOUT_SECONDS)
+    conn.execute(f"PRAGMA busy_timeout = {_DB_BUSY_TIMEOUT_MS}")
     conn.row_factory = sqlite3.Row
     try:
         yield conn
-        conn.commit()
+        _commit_with_retry(conn)
     finally:
         conn.close()
+
+
+def _commit_with_retry(conn: sqlite3.Connection) -> None:
+    for attempt in range(_DB_COMMIT_MAX_ATTEMPTS):
+        try:
+            conn.commit()
+            return
+        except sqlite3.OperationalError as exc:
+            if (
+                not _is_transient_init_error(exc)
+                or attempt == _DB_COMMIT_MAX_ATTEMPTS - 1
+            ):
+                raise
+            time.sleep(_DB_COMMIT_RETRY_DELAY_SECONDS * (attempt + 1))
 
 
 def _row_to_task(row: sqlite3.Row) -> Task:
@@ -521,3 +541,19 @@ def get_agent_session(
             (task_id, stage, backend),
         ).fetchone()
         return str(row["session_id"]) if row else None
+
+
+def delete_agent_session(
+    db_path: Path,
+    task_id: int,
+    stage: str,
+    backend: str,
+) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            DELETE FROM agent_sessions
+            WHERE task_id = ? AND stage = ? AND backend = ?
+            """,
+            (task_id, stage, backend),
+        )

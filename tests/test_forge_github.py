@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from foundry.forges import IssueQuery
+from foundry.forges import ForgeChange, IssueQuery
 from foundry.forges.github import GitHubProvider
 from foundry.shell import Result
 
@@ -72,3 +72,37 @@ def test_github_maps_issue_comments(monkeypatch) -> None:
     assert len(comments) == 1
     assert comments[0].external_id == "IC_1"
     assert comments[0].author == "maintainer"
+
+
+def test_github_feedback_includes_check_urls(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "foundry.forges.base.shell.run",
+        lambda cmd, **kwargs: Result(
+            0,
+            json.dumps({
+                "comments": [],
+                "reviews": [],
+                "statusCheckRollup": [
+                    {
+                        "id": "check-1",
+                        "name": "pytest",
+                        "conclusion": "FAILURE",
+                        "detailsUrl": "https://github.example/checks/1",
+                        "workflowName": "CI",
+                    },
+                    {"id": "check-2", "name": "ruff", "conclusion": "SUCCESS"},
+                ],
+            }),
+            "",
+        ),
+    )
+
+    feedback = GitHubProvider().load_feedback(
+        "owner/repo",
+        ForgeChange(7, "Change", "foundry/task-1", "https://example/pr/7", "head"),
+    )
+
+    assert [check.external_id for check in feedback.failing_checks] == ["check-1"]
+    assert feedback.failing_checks[0].url == "https://github.example/checks/1"
+    assert feedback.failing_checks[0].details == "workflow: CI"
+    assert "https://github.example/checks/1" in feedback.format()

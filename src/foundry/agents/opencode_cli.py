@@ -15,7 +15,7 @@ from .base import (
     first_line,
 )
 from .config import AgentSettings, OpenCodeOpenAIConfig
-from .streaming import _normalize_tool_event, iter_cli_jsonl_with_retry
+from .streaming import CliProcessError, _normalize_tool_event, iter_cli_jsonl_with_retry
 from .tracing import AgentTracer, SpanType
 
 
@@ -34,6 +34,7 @@ class OpencodeCliAgent:
     def __init__(self, settings: AgentSettings) -> None:
         self._settings = settings
         self.stage: AgentStage = settings.stage
+        self._session_stage = settings.prompt_template or settings.stage.value
         self._sessions: dict[int, str] = {}
 
     def apply(
@@ -43,21 +44,12 @@ class OpencodeCliAgent:
         input: str = "",
     ) -> AgentResult:
         resume_id = self.get_session_id(task)
-        if resume_id is None:
-            message = build_fresh_prompt(self.stage, task, input)
-        else:
-            message = input
-
-        cmd: list[str] = [
-            "opencode", "run",
-            "--format", "json",
-            "--dir", str(worktree),
-        ]
-        if self._settings.model:
-            cmd += ["-m", self._settings.model]
-        if resume_id:
-            cmd += ["--session", resume_id]
-        cmd.append(message)
+        generation_input = input if resume_id else build_fresh_prompt(
+            self.stage,
+            task,
+            input,
+            template_name=self._settings.prompt_template,
+        )
 
         tracer = AgentTracer(
             db_path=self._settings.db_path,
@@ -70,16 +62,27 @@ class OpencodeCliAgent:
             with observability.track_generation(
                 name="llm.opencode_cli",
                 model=self._settings.model or None,
-                input=message,
+                input=generation_input,
             ) as gen:
-                events = iter_cli_jsonl_with_retry(
-                    cmd,
-                    cwd=worktree,
-                    env=self._subprocess_env(),
-                    on_event=lambda ev: self._emit_for(task, ev, tracer),
-                    on_lifecycle=tracer.handle_stream_lifecycle,
-                    timeout_sec=self._settings.timeout_sec,
-                )
+                try:
+                    events = self._run_opencode(
+                        task,
+                        worktree,
+                        input,
+                        resume_id=resume_id,
+                        tracer=tracer,
+                    )
+                except CliProcessError as error:
+                    if not resume_id or "Session not found" not in error.stderr:
+                        raise
+                    self._clear_session(task)
+                    events = self._run_opencode(
+                        task,
+                        worktree,
+                        input,
+                        resume_id=None,
+                        tracer=tracer,
+                    )
 
                 new_session_id = self._extract_session_id(events)
                 if new_session_id:
@@ -88,7 +91,7 @@ class OpencodeCliAgent:
                         state.save_agent_session(
                             self._settings.db_path,
                             task.id,
-                            self.stage.value,
+                            self._session_stage,
                             self.name,
                             new_session_id,
                         )
@@ -109,6 +112,50 @@ class OpencodeCliAgent:
             tokens_in=(usage or {}).get("input") if usage else None,
             tokens_out=(usage or {}).get("output") if usage else None,
         )
+
+    def _run_opencode(
+        self,
+        task: AgentTask,
+        worktree: Path,
+        input: str,
+        *,
+        resume_id: str | None,
+        tracer: AgentTracer,
+    ) -> list[dict[str, Any]]:
+        message = input if resume_id else build_fresh_prompt(
+            self.stage,
+            task,
+            input,
+            template_name=self._settings.prompt_template,
+        )
+        cmd: list[str] = [
+            "opencode", "run",
+            "--format", "json",
+            "--dir", str(worktree),
+        ]
+        if self._settings.model:
+            cmd += ["-m", self._settings.model]
+        if resume_id:
+            cmd += ["--session", resume_id]
+        cmd.append(message)
+        return iter_cli_jsonl_with_retry(
+            cmd,
+            cwd=worktree,
+            env=self._subprocess_env(),
+            on_event=lambda ev: self._emit_for(task, ev, tracer),
+            on_lifecycle=tracer.handle_stream_lifecycle,
+            timeout_sec=self._settings.timeout_sec,
+        )
+
+    def _clear_session(self, task: AgentTask) -> None:
+        self._sessions.pop(task.id, None)
+        if self._settings.db_path is not None:
+            state.delete_agent_session(
+                self._settings.db_path,
+                task.id,
+                self._session_stage,
+                self.name,
+            )
 
     def _subprocess_env(self) -> dict[str, str]:
         env = scrubbed_agent_env(self.name)
@@ -204,7 +251,7 @@ class OpencodeCliAgent:
         if self._settings.db_path is None:
             return None
         session_id = state.get_agent_session(
-            self._settings.db_path, task.id, self.stage.value, self.name
+            self._settings.db_path, task.id, self._session_stage, self.name
         )
         if session_id:
             self._sessions[task.id] = session_id
