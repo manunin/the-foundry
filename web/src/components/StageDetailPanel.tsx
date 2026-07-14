@@ -18,7 +18,7 @@ interface Props {
   events: UiEvent[];
 }
 
-const AGENT_STAGES = new Set(["agent_plan", "agent_implement", "verify"]);
+const AGENT_STAGES = new Set(["agent_plan", "agent_implement", "verify", "ui_tests"]);
 
 type TabId = "input" | "stream" | "output";
 
@@ -323,7 +323,9 @@ export default function StageDetailPanel({ task, stageId, events }: Props): JSX.
       )}
 
       {/* Composer stub (UI-only) */}
-      {isAgentStage && <AskAgentComposer agent={stage.agent} stageLabel={stageMeta?.label ?? stageId} />}
+      {isAgentStage && stageId !== "ui_tests" && (
+        <AskAgentComposer agent={stage.agent} stageLabel={stageMeta?.label ?? stageId} />
+      )}
     </div>
   );
 }

@@ -26,7 +26,7 @@ from langfuse import observe
 from . import security, shell, state, worktree
 from .agents import AgentSettings, AgentStage
 from .agents.base import AgentTask, build_fresh_prompt
-from .config import Settings
+from .config import Settings, task_has_label
 from .events import read_events, record_event, stage_span
 from foundry.forges import (
     ChangeFeedback,
@@ -42,6 +42,7 @@ from .stages import openspec
 from .stages import issue_comment as issue_comment_stage
 from .stages import pr as pr_stage
 from .stages import verify as verify_stage
+from .stages import ui_tests as ui_tests_stage
 
 log = structlog.get_logger()
 
@@ -52,7 +53,14 @@ class WorkflowName(StrEnum):
     PR_FEEDBACK = "pr_feedback"
 
 
-FailureKind = Literal["deterministic", "acceptance", "infra", "unclear", "dangerous"]
+FailureKind = Literal[
+    "deterministic",
+    "acceptance",
+    "infra",
+    "unclear",
+    "dangerous",
+    "ui_crawler",
+]
 
 
 @dataclass(frozen=True)
@@ -134,7 +142,13 @@ def normalize_verification(raw: dict[str, Any]) -> VerificationDecision:
             raw=raw,
         )
     failure_kind = raw.get("failure_kind")
-    if failure_kind not in ("deterministic", "acceptance", "infra", "dangerous"):
+    if failure_kind not in (
+        "deterministic",
+        "acceptance",
+        "infra",
+        "dangerous",
+        "ui_crawler",
+    ):
         failure_kind = "unclear"
     requires_human = bool(raw.get("requires_human")) or failure_kind == "unclear"
     retryable = bool(raw.get("retryable")) and not requires_human
@@ -206,6 +220,35 @@ def _build_attempt_input(
     if previous_report:
         parts.append(f"\n### Previous verification report\n{previous_report}\n")
     return "".join(parts)
+
+
+UI_PLANNING_REQUIREMENT = """
+## UI crawler planning requirement
+
+This issue opted into the post-implementation UI crawler quality gate. Read
+`.codex/skills/deploy-mac-mini-json-ui/SKILL.md` in the target worktree. The
+plan must specify stand URL discovery, concrete user journeys and routes,
+initial state or fixtures, viewport, assertions, browser console/network
+failure rules, and screenshot checkpoints. End with `NEED_VERIFICATION` if the
+skill is missing or no testable route and acceptance behavior can be identified.
+""".strip()
+
+
+def _ui_retry_report(result: dict[str, Any]) -> str:
+    parts = [str(result.get("report") or "UI crawler failed")]
+    for scenario in result.get("scenarios", []):
+        if isinstance(scenario, dict) and scenario.get("status") == "failed":
+            detail = f"- {scenario.get('name')}: {scenario.get('error') or 'assertion failed'}"
+            parts.append(detail)
+    for label, key in (
+        ("Core logs", "core_logs"),
+        ("UI logs", "ui_logs"),
+        ("Browser logs", "browser_logs"),
+    ):
+        value = str(result.get(key) or "")
+        if value:
+            parts.extend([f"\n### {label}", value])
+    return "\n".join(parts)
 
 
 def _build_pr_feedback_input(
@@ -532,6 +575,9 @@ def dev_task(
             description=task.issue_body,
         )
         plan_input = context_stage.format_for_prompt(ctx)
+        ui_tests_enabled = task_has_label(task, settings.ui_test_label)
+        if ui_tests_enabled:
+            plan_input = f"{plan_input}\n\n{UI_PLANNING_REQUIREMENT}"
         plan_prompt = build_fresh_prompt(
             AgentStage.PLAN,
             plan_agent_task,
@@ -542,10 +588,20 @@ def dev_task(
             settings.db_path,
             task.id,
             Stage.PLAN.value,
-            input={"title": task.issue_title, "prompt": plan_prompt},
+            input={
+                "title": task.issue_title,
+                "prompt": plan_prompt,
+                "ui_tests_enabled": ui_tests_enabled,
+            },
             agent={"name": plan_agent_settings.backend, "model": plan_agent_settings.model},
         ) as finish:
-            plan = agent_plan_stage.run(task, ctx, wt_path, settings)
+            plan = agent_plan_stage.run(
+                task,
+                ctx,
+                wt_path,
+                settings,
+                planner_input=plan_input,
+            )
             finish(
                 output={"summary": plan.get("summary", ""), "text": plan.get("plan", "")},
                 cost_usd=plan.get("cost_usd"),
@@ -734,15 +790,77 @@ def dev_task(
         else:
             decision = normalize_verification(saved_verify)
 
+        if decision.passed and task_has_label(task, settings.ui_test_label):
+            saved_ui_tests = state.get_stage_result(
+                settings.db_path, task.id, Stage.UI_TESTS, attempt=attempt
+            )
+            if saved_ui_tests is None:
+                task = _mark(settings, task, stage=Stage.UI_TESTS)
+                ui_agent_settings = AgentSettings.from_env(
+                    AgentStage.UI_TESTS, db_path=settings.db_path
+                )
+                with stage_span(
+                    settings.db_path,
+                    task.id,
+                    Stage.UI_TESTS.value,
+                    input={
+                        "attempt": attempt,
+                        "plan_summary": str(plan.get("summary") or "")[:1000],
+                        "skill_path": ui_tests_stage.DEPLOY_SKILL.as_posix(),
+                        "artifact_policy": {
+                            "max_files": settings.ui_test_artifact_max_files,
+                            "max_file_bytes": settings.ui_test_artifact_max_file_bytes,
+                            "max_attempt_bytes": settings.ui_test_artifact_max_attempt_bytes,
+                        },
+                    },
+                    agent={
+                        "name": ui_agent_settings.backend,
+                        "model": ui_agent_settings.model,
+                    },
+                ) as finish:
+                    saved_ui_tests = ui_tests_stage.run(
+                        task,
+                        wt_path,
+                        settings,
+                        plan_text=plan_text,
+                        attempt=attempt,
+                    )
+                    finish(
+                        output=saved_ui_tests,
+                        cost_usd=saved_ui_tests.get("cost_usd"),
+                        tokens_in=saved_ui_tests.get("tokens_in"),
+                        tokens_out=saved_ui_tests.get("tokens_out"),
+                    )
+                state.save_stage_result(
+                    settings.db_path,
+                    task.id,
+                    Stage.UI_TESTS,
+                    saved_ui_tests,
+                    attempt=attempt,
+                )
+                state.append_log(
+                    settings.db_path,
+                    task.id,
+                    Stage.UI_TESTS,
+                    {
+                        "attempt": attempt,
+                        "passed": saved_ui_tests.get("passed", False),
+                        "failure_kind": saved_ui_tests.get("failure_kind"),
+                    },
+                )
+            decision = normalize_verification(saved_ui_tests)
+            if not decision.passed and decision.failure_kind == "ui_crawler":
+                decision = replace(decision, report=_ui_retry_report(saved_ui_tests))
+
         if decision.passed:
             break
         if decision.requires_human:
             return _block_for_human(
                 settings,
                 task,
-                blocked_stage=Stage.VERIFY,
+                blocked_stage=task.current_stage,
                 reason=(
-                    f"verify requires human intervention (attempt {attempt}, "
+                    f"quality gate requires human intervention (attempt {attempt}, "
                     f"kind={decision.failure_kind})"
                 ),
                 questions=decision.report,
@@ -751,12 +869,12 @@ def dev_task(
             )
         if not decision.retryable:
             raise RuntimeError(
-                f"verify failed non-retryably (attempt {attempt}, "
+                f"quality gate failed non-retryably (attempt {attempt}, "
                 f"kind={decision.failure_kind}): {decision.report}"
             )
         if attempt >= max_attempts:
             raise RuntimeError(
-                f"verify failed after {attempt} attempts "
+                f"quality gate failed after {attempt} attempts "
                 f"(kind={decision.failure_kind}): {decision.report}"
             )
         # Otherwise: retryable failure with remaining budget — loop.

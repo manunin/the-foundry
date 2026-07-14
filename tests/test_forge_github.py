@@ -35,6 +35,32 @@ def test_github_maps_issues_and_preserves_filters(monkeypatch) -> None:
     ]
 
 
+def test_github_get_issue_requests_and_preserves_labels(monkeypatch) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs) -> Result:
+        commands.append(cmd)
+        return Result(
+            0,
+            json.dumps(
+                {
+                    "number": 9,
+                    "title": "Manual",
+                    "body": "Body",
+                    "labels": [{"name": "ui-agent-test"}],
+                }
+            ),
+            "",
+        )
+
+    monkeypatch.setattr("foundry.forges.base.shell.run", fake_run)
+
+    issue = GitHubProvider().get_issue("owner/repo", 9)
+
+    assert issue.labels == ("ui-agent-test",)
+    assert commands[0][-2:] == ["--json", "number,title,body,labels"]
+
+
 def test_github_clone_uses_cli(monkeypatch, tmp_path: Path) -> None:
     commands: list[list[str]] = []
     monkeypatch.setattr(

@@ -12,7 +12,14 @@ from .context import format_for_prompt
 
 
 @observe(name="stage.plan")
-def run(task: Task, ctx: dict, worktree_path: Path, settings: Settings) -> dict:
+def run(
+    task: Task,
+    ctx: dict,
+    worktree_path: Path,
+    settings: Settings,
+    *,
+    planner_input: str | None = None,
+) -> dict:
     """Agent-backed plan stage: delegates to the configured plan_agent.
 
     Returns {"plan": <full agent response>, "summary": <first line>}.
@@ -26,7 +33,11 @@ def run(task: Task, ctx: dict, worktree_path: Path, settings: Settings) -> dict:
         title=task.issue_title,
         description=task.issue_body,
     )
-    r = agent.apply(task=agent_task, worktree=worktree_path, input=format_for_prompt(ctx))
+    r = agent.apply(
+        task=agent_task,
+        worktree=worktree_path,
+        input=planner_input if planner_input is not None else format_for_prompt(ctx),
+    )
     return {
         "agent": agent.name,
         "stage": r.stage.value,

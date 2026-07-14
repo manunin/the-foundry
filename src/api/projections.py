@@ -5,7 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from foundry.models import Event, Task
+from foundry.config import task_has_label
+from foundry.models import Event, Stage, Task
 
 # Aliases applied at the projection boundary only. DB and pipeline keep the
 # internal FSM names (`plan`, `implement`, `verify`, ...).
@@ -97,6 +98,7 @@ class UiTask(BaseModel):
     stages: dict[str, UiStage] = Field(default_factory=dict)
     memory: list[UiMemoryEntry] = Field(default_factory=list)
     events: list[UiEvent] | None = None
+    ui_tests_enabled: bool = False
 
 
 def project_task(
@@ -106,6 +108,7 @@ def project_task(
     include_events: bool = False,
     events_limit: int = 200,
     memory: list[dict[str, Any]] | None = None,
+    ui_test_label: str = "ui-agent-test",
 ) -> UiTask:
     """Fold Task + its events into a UI-friendly projection.
 
@@ -140,7 +143,8 @@ def project_task(
             st.tokens_in = payload.get("tokens_in")
             st.tokens_out = payload.get("tokens_out")
             if "output" in payload:
-                st.output = payload.get("output")
+                output = payload.get("output")
+                st.output = _project_stage_output(task, aliased, output)
             stages[aliased] = st
 
             if isinstance(st.cost_usd, (int, float)):
@@ -224,9 +228,52 @@ def project_task(
         stages=stages,
         memory=[UiMemoryEntry(**entry) for entry in (memory or [])],
         events=ui_events,
+        ui_tests_enabled=task_has_label(task, ui_test_label),
     )
 
 
+def _project_stage_output(
+    task: Task, stage: str, output: Any
+) -> dict[str, Any] | None:
+    if not isinstance(output, dict):
+        return output
+    if stage != Stage.UI_TESTS.value:
+        return output
+    projected = dict(output)
+    screenshots = output.get("screenshots")
+    if isinstance(screenshots, list):
+        artifact_urls = {
+            str(item["artifact_path"]).split("/", 1)[-1]: (
+                f"/api/tasks/{task.id}/artifacts/{item['artifact_path']}"
+            )
+            for item in screenshots
+            if isinstance(item, dict) and isinstance(item.get("artifact_path"), str)
+        }
+        projected["screenshots"] = [
+            {
+                **{key: value for key, value in item.items() if key != "artifact_path"},
+                "url": (
+                    f"/api/tasks/{task.id}/artifacts/{item['artifact_path']}"
+                ),
+            }
+            for item in screenshots
+            if isinstance(item, dict) and isinstance(item.get("artifact_path"), str)
+        ]
+        scenarios = output.get("scenarios")
+        if isinstance(scenarios, list):
+            projected["scenarios"] = [
+                {
+                    **scenario,
+                    "screenshots": [
+                        artifact_urls[path]
+                        for path in scenario.get("screenshots", [])
+                        if isinstance(path, str) and path in artifact_urls
+                    ],
+                }
+                for scenario in scenarios
+                if isinstance(scenario, dict)
+            ]
+    return projected
 def _fold_trace_span(
     summary: UiTraceSummary,
     payload: dict[str, Any],

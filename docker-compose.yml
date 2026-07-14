@@ -58,6 +58,8 @@ services:
       # Uncomment the auth directory for the real coding backend you use.
       # - ${HOME}/.claude:/root/.claude
       - ${HOST_CODEX_DIR:-./.docker/codex}:/root/.codex
+      # UI crawler tasks use repository-owned deploy skills and operator-provisioned keys.
+      - ${HOST_SSH_DIR:-./.docker/ssh}:/root/.ssh:ro
       # - ${HOME}/.local/share/opencode:/root/.local/share/opencode
     command: ["foundry", "run"]
     depends_on:

@@ -48,7 +48,7 @@ class GitHubProvider:
     def get_issue(self, project: str, number: int) -> ForgeIssue:
         cmd = [
             "gh", "issue", "view", str(number), "--repo", project,
-            "--json", "number,title,body", *self._host_args(),
+            "--json", "number,title,body,labels", *self._host_args(),
         ]
         return self._issue(
             parse_json(run_with_retry(cmd), operation="get issue", project=project),

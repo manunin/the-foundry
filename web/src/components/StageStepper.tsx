@@ -2,7 +2,7 @@ import type { CSSProperties, JSX } from "react";
 import { Fragment } from "react";
 import { Check, X } from "lucide-react";
 
-import { STAGES } from "../stages";
+import { stagesForTask } from "../stages";
 import type { UiStage } from "../api";
 
 type Size = "sm" | "md" | "lg";
@@ -14,6 +14,7 @@ interface Props {
   showLabels?: boolean;
   onStageClick?: (stageId: string) => void;
   selectedStage?: string | null;
+  uiTestsEnabled?: boolean;
 }
 
 const SIZES: Record<Size, { dot: number; gap: number; labelFs: number; connH: number }> = {
@@ -28,12 +29,14 @@ export default function StageStepper({
   showLabels = false,
   onStageClick,
   selectedStage,
+  uiTestsEnabled = false,
 }: Props): JSX.Element {
   const sizes = SIZES[size];
+  const stagesMeta = stagesForTask(uiTestsEnabled);
 
   return (
     <div style={{ display: "flex", alignItems: "center" }}>
-      {STAGES.map((s, idx) => {
+      {stagesMeta.map((s, idx) => {
         const st = stages[s.id] ?? { name: s.id, status: "pending" as const };
         const isDone = st.status === "done";
         const isRunning = st.status === "running";
@@ -136,7 +139,7 @@ export default function StageStepper({
               </div>
               {showLabels && <span style={labelStyle}>{s.label}</span>}
             </div>
-            {idx < STAGES.length - 1 && (
+            {idx < stagesMeta.length - 1 && (
               <div
                 style={{
                   width: sizes.gap,

@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     forge TEXT NOT NULL DEFAULT 'github',
     forge_host TEXT NOT NULL DEFAULT 'github.com',
     issue_url TEXT,
+    issue_labels_json TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL,
     current_stage TEXT NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -112,6 +113,7 @@ def _migrate_tasks(conn: sqlite3.Connection) -> None:
         "forge": "TEXT NOT NULL DEFAULT 'github'",
         "forge_host": "TEXT NOT NULL DEFAULT 'github.com'",
         "issue_url": "TEXT",
+        "issue_labels_json": "TEXT NOT NULL DEFAULT '[]'",
     }
     for name, definition in additions.items():
         if name not in columns:
@@ -154,6 +156,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         forge=ForgeKind(row["forge"]),
         forge_host=row["forge_host"],
         issue_url=row["issue_url"],
+        issue_labels=_parse_issue_labels(row["issue_labels_json"]),
         status=TaskStatus(row["status"]),
         current_stage=Stage(row["current_stage"]),
         attempts=row["attempts"],
@@ -164,6 +167,16 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _parse_issue_labels(raw: str | None) -> tuple[str, ...]:
+    try:
+        value = json.loads(raw or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return ()
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return ()
+    return tuple(value)
 
 
 def get_task_by_issue(db_path: Path, repo: str, issue_number: int) -> Task | None:
@@ -201,12 +214,12 @@ def upsert_task(db_path: Path, task: Task) -> Task:
                 """
                 INSERT INTO tasks (
                     repo, issue_number, issue_title, issue_body,
-                    forge, forge_host, issue_url,
+                    forge, forge_host, issue_url, issue_labels_json,
                     status, current_stage, attempts,
                     worktree_path, branch_name, pr_url, logs_json,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task.repo,
@@ -216,6 +229,7 @@ def upsert_task(db_path: Path, task: Task) -> Task:
                     task.forge.value,
                     task.forge_host,
                     task.issue_url,
+                    json.dumps(task.issue_labels),
                     task.status.value,
                     task.current_stage.value,
                     task.attempts,
@@ -233,7 +247,7 @@ def upsert_task(db_path: Path, task: Task) -> Task:
                 """
                 UPDATE tasks SET
                     issue_title = ?, issue_body = ?,
-                    forge = ?, forge_host = ?, issue_url = ?,
+                    forge = ?, forge_host = ?, issue_url = ?, issue_labels_json = ?,
                     status = ?, current_stage = ?, attempts = ?,
                     worktree_path = ?, branch_name = ?, pr_url = ?, logs_json = ?,
                     updated_at = ?
@@ -245,6 +259,7 @@ def upsert_task(db_path: Path, task: Task) -> Task:
                     task.forge.value,
                     task.forge_host,
                     task.issue_url,
+                    json.dumps(task.issue_labels),
                     task.status.value,
                     task.current_stage.value,
                     task.attempts,
@@ -307,6 +322,7 @@ def resume_task_with_clarification(db_path: Path, task: Task) -> Task:
         Stage.PLAN,
         Stage.IMPLEMENT,
         Stage.VERIFY,
+        Stage.UI_TESTS,
         Stage.PR,
     ]
     if task.current_stage not in stage_order:

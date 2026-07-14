@@ -238,6 +238,86 @@ def test_dev_task_pass_after_retry_opens_pr(tmp_path: Path) -> None:
     ]
 
 
+def test_dev_task_labelled_runs_ui_tests_and_retries_with_browser_logs(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path, max_implement_attempts=2)
+    state.init_db(settings.db_path)
+    seeded = _seed_task(settings.db_path)
+    seeded.issue_labels = ("UI-Agent-Test",)
+    state.upsert_task(settings.db_path, seeded)
+    implement_calls: list[dict] = []
+
+    def implement_run(task, plan, worktree_path, settings):
+        implement_calls.append(plan)
+        return {"result": f"attempt-{len(implement_calls)}", "response": ""}
+
+    ui_results = iter(
+        [
+            {
+                "passed": False,
+                "retryable": True,
+                "requires_human": False,
+                "failure_kind": "ui_crawler",
+                "report": "checkout failed",
+                "scenarios": [
+                    {
+                        "name": "checkout",
+                        "status": "failed",
+                        "error": "button hidden",
+                    }
+                ],
+                "screenshots": [],
+                "core_logs": "core tail",
+                "ui_logs": "ui tail",
+                "browser_logs": "browser tail",
+            },
+            {
+                "passed": True,
+                "retryable": False,
+                "requires_human": False,
+                "failure_kind": None,
+                "report": "green",
+                "scenarios": [],
+                "screenshots": [],
+            },
+        ]
+    )
+    plan_run = MagicMock(return_value={"plan": "crawl checkout", "summary": "plan"})
+    ctxs = [
+        patch("foundry.pipeline.fetch_stage.fetch", return_value=[seeded]),
+        *[patch(target, **kwargs) for target, kwargs in _dev_task_patches(tmp_path).items()],
+        patch("foundry.workflows.agent_plan_stage.run", plan_run),
+        patch("foundry.workflows.agent_implement_stage.run", side_effect=implement_run),
+        patch(
+            "foundry.workflows.verify_stage.run",
+            return_value={"passed": True, "report": "local green"},
+        ),
+        patch(
+            "foundry.workflows.ui_tests_stage.run",
+            side_effect=lambda *args, **kwargs: next(ui_results),
+        ),
+    ]
+    _start(ctxs)
+    try:
+        processed = pipeline.run_once(settings)
+    finally:
+        _stop(ctxs)
+
+    final = state.get_task(settings.db_path, processed[0].id)
+    assert final.status == TaskStatus.DONE
+    assert len(implement_calls) == 2
+    retry_input = implement_calls[1]["plan"]
+    assert "core tail" in retry_input
+    assert "ui tail" in retry_input
+    assert "browser tail" in retry_input
+    assert "UI crawler planning requirement" in plan_run.call_args.kwargs["planner_input"]
+    events = read_events(settings.db_path, final.id)
+    assert len(
+        [event for event in events if event.stage == "ui_tests" and event.kind == "stage_finished"]
+    ) == 2
+
+
 def test_dev_task_resumes_verify_after_process_dies_post_implement(
     tmp_path: Path,
 ) -> None:

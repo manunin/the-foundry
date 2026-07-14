@@ -40,6 +40,16 @@ def test_build_fresh_prompt_loads_different_templates_per_stage() -> None:
     assert plan_prompt != verify_prompt
 
 
+def test_ui_tests_prompt_defines_manifest_and_deploy_skill() -> None:
+    task = AgentTask(id=1, title="T", description="D")
+
+    prompt = build_fresh_prompt(AgentStage.UI_TESTS, task, input="crawl checkout")
+
+    assert ".codex/skills/deploy-mac-mini-json-ui/SKILL.md" in prompt
+    assert ".foundry/ui-tests/result.json" in prompt
+    assert "crawl checkout" in prompt
+
+
 def test_default_prompt_templates_do_not_include_openspec_mode_directives() -> None:
     task = AgentTask(id=1, title="T", description="D")
 

@@ -9,7 +9,7 @@ import { ExternalLink, Folder, GitBranch, Hash, RotateCcw } from "lucide-react";
 
 import { resetTask } from "../api";
 import type { UiEvent, UiTask } from "../api";
-import { STAGES } from "../stages";
+import { stagesForTask } from "../stages";
 import StageDetailPanel from "./StageDetailPanel";
 import StageStepper from "./StageStepper";
 
@@ -21,22 +21,23 @@ interface Props {
 }
 
 function pickDefaultStage(task: UiTask): string {
+  const stages = stagesForTask(task.ui_tests_enabled);
   // running > failed > last done > current_stage > first
-  for (const s of STAGES) {
+  for (const s of stages) {
     if (task.stages[s.id]?.status === "running") return s.id;
   }
-  for (const s of STAGES) {
+  for (const s of stages) {
     if (task.stages[s.id]?.status === "failed") return s.id;
   }
   let last: string | null = null;
-  for (const s of STAGES) {
+  for (const s of stages) {
     if (task.stages[s.id]?.status === "done") last = s.id;
   }
   if (last) return last;
-  if (task.current_stage && STAGES.some((s) => s.id === task.current_stage)) {
+  if (task.current_stage && stages.some((s) => s.id === task.current_stage)) {
     return task.current_stage;
   }
-  return STAGES[0].id;
+  return stages[0].id;
 }
 
 function formatMemoryValue(value: unknown): string {
@@ -340,6 +341,7 @@ export default function TaskDetails({
               setSelectedStage(sid);
               setUserPicked(true);
             }}
+            uiTestsEnabled={task.ui_tests_enabled}
           />
         </div>
       </div>

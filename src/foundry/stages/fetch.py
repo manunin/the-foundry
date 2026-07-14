@@ -42,12 +42,26 @@ def _issue_to_task(settings: Settings, issue: ForgeIssue) -> Task:
         forge=settings.forge,
         forge_host=settings.forge_host,
         issue_url=issue.url,
+        issue_labels=tuple(dict.fromkeys(label.strip() for label in issue.labels if label.strip())),
     )
 
 
 def _upsert_issue(settings: Settings, issue: ForgeIssue) -> Task:
-    task = _issue_to_task(settings, issue)
-    return state.upsert_task(settings.db_path, task)
+    incoming = _issue_to_task(settings, issue)
+    existing = state.get_task_by_issue(
+        settings.db_path, settings.source_repo, issue.number
+    )
+    if existing is None:
+        return state.upsert_task(settings.db_path, incoming)
+    if existing.current_stage in {Stage.FETCH, Stage.CONTEXT}:
+        existing.issue_title = incoming.issue_title
+        existing.issue_body = incoming.issue_body
+        existing.issue_url = incoming.issue_url
+        existing.issue_labels = incoming.issue_labels
+        existing.forge = incoming.forge
+        existing.forge_host = incoming.forge_host
+        return state.upsert_task(settings.db_path, existing)
+    return existing
 
 
 def fetch_issue(
@@ -89,6 +103,7 @@ def fetch(settings: Settings, provider: ForgeProvider | None = None) -> list[Tas
             if task.id is not None:
                 ready_ids.add(task.id)
         else:
+            existing = _upsert_issue(settings, issue)
             # Re-queue pending tasks and resume interrupted running tasks.
             if existing.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
                 ready.append(existing)
@@ -115,6 +130,7 @@ def fetch(settings: Settings, provider: ForgeProvider | None = None) -> list[Tas
         if task.current_stage in {
             Stage.IMPLEMENT,
             Stage.VERIFY,
+            Stage.UI_TESTS,
             Stage.PR,
             Stage.CONTEXT,
             Stage.PLAN,

@@ -14,6 +14,7 @@ DEFAULT_MAX_TURNS: dict[AgentStage, int] = {
     AgentStage.PLAN: 50,
     AgentStage.IMPLEMENT: 50,
     AgentStage.VERIFY: 20,
+    AgentStage.UI_TESTS: 50,
 }
 
 

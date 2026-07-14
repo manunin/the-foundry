@@ -1,5 +1,31 @@
 # The Foundry — Architecture Reference
 
+## Label-gated UI crawler stage
+
+`Task.issue_labels` is a persisted snapshot of normalized forge labels. Labels
+may refresh during FETCH/CONTEXT, but freeze when PLAN begins. A case-insensitive
+match for `UI_TEST_LABEL` enables UI-aware planning and this additional FSM edge:
+
+```text
+IMPLEMENT -> VERIFY -> UI_TESTS -> PR
+                    \-> IMPLEMENT (crawler assertion failure)
+                    \-> BLOCKED (deployment/browser/manifest infrastructure)
+```
+
+VERIFY always runs first. UI_TESTS shares `MAX_IMPLEMENT_ATTEMPTS` with VERIFY,
+and its per-attempt result is stored in `stage_results`, so a restart reuses a
+completed crawl. The target worktree owns deployment behavior at
+`.codex/skills/deploy-mac-mini-json-ui/SKILL.md`. Foundry validates the versioned
+manifest, relative paths, symlinks, image signatures, counts, and byte limits
+before copying screenshots to
+`DB_PATH.parent/artifacts/task-{id}/attempt-{attempt}`. The temporary worktree
+directory is always removed.
+
+Only task-scoped, manifest-listed images are served by the API. Stage events
+contain structured scenario results and bounded diagnostic tails, never SSH
+material or unbounded logs. Unlabelled tasks retain the original FSM and need no
+deploy, SSH, or browser infrastructure.
+
 Forge-интеграция находится в `src/foundry/forges/`. GitHub (`gh`) остаётся
 default; GitLab (`glab`) выбирается через `FORGE_PROVIDER=gitlab`. Адаптер
 нормализует issues, PR/MR и feedback, поэтому FSM и persisted stage names не

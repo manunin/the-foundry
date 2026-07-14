@@ -224,6 +224,28 @@ def test_init_migrates_legacy_tasks_idempotently(tmp_path: Path) -> None:
     assert task.forge.value == "github"
     assert task.forge_host == "github.com"
     assert task.issue_url is None
+    assert task.issue_labels == ()
+
+
+def test_issue_labels_round_trip_and_malformed_storage_falls_back(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "labels.sqlite"
+    state.init_db(db)
+    task = _make_task()
+    task.issue_labels = ("agent-task", "UI-Agent-Test")
+    saved = state.upsert_task(db, task)
+
+    assert state.get_task(db, saved.id).issue_labels == (
+        "agent-task",
+        "UI-Agent-Test",
+    )
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE tasks SET issue_labels_json = ? WHERE id = ?",
+            ('{"not": "a list"}', saved.id),
+        )
+    assert state.get_task(db, saved.id).issue_labels == ()
 
 
 def test_resume_with_clarification_preserves_upstream_stage(tmp_path: Path) -> None:
@@ -245,6 +267,7 @@ def test_resume_with_clarification_preserves_upstream_stage(tmp_path: Path) -> N
     state.save_stage_result(db, task.id, Stage.CONTEXT, {"context": "cached"})
     state.save_stage_result(db, task.id, Stage.PLAN, {"plan": "draft"})
     state.save_stage_result(db, task.id, Stage.IMPLEMENT, {"result": "stale"})
+    state.save_stage_result(db, task.id, Stage.UI_TESTS, {"passed": True})
     task.issue_body = "Original\n\nClarification"
 
     resumed = state.resume_task_with_clarification(db, task)
@@ -257,3 +280,4 @@ def test_resume_with_clarification_preserves_upstream_stage(tmp_path: Path) -> N
     }
     assert state.get_stage_result(db, task.id, Stage.PLAN) is None
     assert state.get_stage_result(db, task.id, Stage.IMPLEMENT) is None
+    assert state.get_stage_result(db, task.id, Stage.UI_TESTS) is None

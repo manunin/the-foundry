@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections import Counter
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
 
 from foundry import state
 from foundry.config import ConfigError, load_settings
@@ -40,7 +42,15 @@ async def get_tasks() -> list[UiTask]:
     for task in tasks:
         events = read_events(settings.db_path, task.id) if task.id is not None else []
         memory = state.list_repo_memory(settings.db_path, task.repo)
-        result.append(project_task(task, events, include_events=False, memory=memory))
+        result.append(
+            project_task(
+                task,
+                events,
+                include_events=False,
+                memory=memory,
+                ui_test_label=settings.ui_test_label,
+            )
+        )
     return result
 
 
@@ -56,8 +66,50 @@ async def get_task(task_id: int) -> UiTask:
     events = read_events(settings.db_path, task_id)
     memory = state.list_repo_memory(settings.db_path, task.repo)
     return project_task(
-        task, events, include_events=True, events_limit=200, memory=memory
+        task,
+        events,
+        include_events=True,
+        events_limit=200,
+        memory=memory,
+        ui_test_label=settings.ui_test_label,
     )
+
+
+@app.get("/api/tasks/{task_id}/artifacts/{artifact_path:path}")
+async def get_task_artifact(task_id: int, artifact_path: str) -> FileResponse:
+    settings = _settings_or_raise()
+    state.init_db(settings.db_path)
+    task = state.get_task(settings.db_path, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+    relative = Path(artifact_path)
+    if relative.is_absolute() or ".." in relative.parts or not artifact_path:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    allowed = {
+        str(item.get("artifact_path"))
+        for _, result in state.list_stage_results(
+            settings.db_path, task_id, Stage.UI_TESTS
+        )
+        for item in result.get("screenshots", [])
+        if isinstance(item, dict) and isinstance(item.get("artifact_path"), str)
+    }
+    normalized = relative.as_posix()
+    if normalized not in allowed:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    task_root = (settings.ui_test_artifact_root / f"task-{task_id}").resolve()
+    target = (task_root / relative).resolve()
+    if not target.is_relative_to(task_root) or not target.is_file():
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    media_type = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }.get(target.suffix.lower())
+    if media_type is None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    return FileResponse(target, media_type=media_type)
 
 
 @app.get("/api/tasks/{task_id}/event-history", response_model=list[UiEvent])
@@ -120,7 +172,12 @@ def _set_task_pending(task_id: int, *, clear_execution: bool) -> UiTask:
     events = read_events(settings.db_path, task_id)
     memory = state.list_repo_memory(settings.db_path, task.repo)
     return project_task(
-        task, events, include_events=True, events_limit=200, memory=memory
+        task,
+        events,
+        include_events=True,
+        events_limit=200,
+        memory=memory,
+        ui_test_label=settings.ui_test_label,
     )
 
 

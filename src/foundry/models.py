@@ -17,6 +17,7 @@ class Stage(StrEnum):
     PLAN = "plan"
     IMPLEMENT = "implement"
     VERIFY = "verify"
+    UI_TESTS = "ui_tests"
     ISSUE_COMMENT = "issue_comment"
     PR = "pr"
     DONE = "done"
@@ -54,6 +55,7 @@ class Task:
     forge: ForgeKind = ForgeKind.GITHUB
     forge_host: str = "github.com"
     issue_url: str | None = None
+    issue_labels: tuple[str, ...] = ()
 
 
 @dataclass

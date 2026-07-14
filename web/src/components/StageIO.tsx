@@ -11,6 +11,7 @@
 import type { JSX } from "react";
 import { useState } from "react";
 import { File, Folder } from "lucide-react";
+import { apiUrl, type UiCrawlerResult } from "../api";
 
 type IOData = Record<string, unknown> | null | undefined;
 
@@ -199,8 +200,78 @@ function Empty(): JSX.Element {
   );
 }
 
+function isCrawlerResult(data: Record<string, unknown>): data is UiCrawlerResult & Record<string, unknown> {
+  return (
+    typeof data.passed === "boolean" &&
+    typeof data.report === "string" &&
+    Array.isArray(data.scenarios) &&
+    Array.isArray(data.screenshots)
+  );
+}
+
+function CrawlerResult({ result }: { result: UiCrawlerResult }): JSX.Element {
+  const passed = result.scenarios.filter((scenario) => scenario.status === "passed").length;
+  const failed = result.scenarios.length - passed;
+  return (
+    <div className="crawler-result">
+      <div className="crawler-summary">
+        <span className={result.passed ? "crawler-pass" : "crawler-fail"}>
+          {result.passed ? "Passed" : "Failed"}
+        </span>
+        <span>{passed} passed</span>
+        <span>{failed} failed</span>
+        {result.deployed_url && (
+          <a href={result.deployed_url} target="_blank" rel="noreferrer noopener">
+            deployed app
+          </a>
+        )}
+      </div>
+      <div className="crawler-scenarios">
+        {result.scenarios.map((scenario) => (
+          <div className="crawler-scenario" key={scenario.name}>
+            <div>
+              <strong>{scenario.name}</strong>
+              <span className={scenario.status === "passed" ? "crawler-pass" : "crawler-fail"}>
+                {scenario.status}
+              </span>
+              <span>{scenario.duration_ms} ms</span>
+            </div>
+            {scenario.error && <pre className="mono">{scenario.error}</pre>}
+          </div>
+        ))}
+      </div>
+      {result.screenshots.length > 0 && (
+        <div className="crawler-gallery">
+          {result.screenshots.map((screenshot) => (
+            <a
+              key={screenshot.url}
+              href={apiUrl(screenshot.url)}
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              <img loading="lazy" src={apiUrl(screenshot.url)} alt={screenshot.name} />
+              <span>{screenshot.name}</span>
+            </a>
+          ))}
+        </div>
+      )}
+      {(["core_logs", "ui_logs", "browser_logs"] as const).map((key) => {
+        const value = result[key];
+        return value ? (
+          <details key={key} className="crawler-logs">
+            <summary>{key.replace("_", " ")}</summary>
+            <pre className="mono">{value}</pre>
+          </details>
+        ) : null;
+      })}
+    </div>
+  );
+}
+
 export default function StageIO({ data }: Props): JSX.Element {
   if (!data) return <Empty />;
+
+  if (isCrawlerResult(data)) return <CrawlerResult result={data} />;
 
   const kind = typeof data.kind === "string" ? (data.kind as string) : undefined;
 

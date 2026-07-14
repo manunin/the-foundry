@@ -15,6 +15,7 @@ class AgentStage(StrEnum):
     PLAN = "plan"
     IMPLEMENT = "implement"
     VERIFY = "verify"
+    UI_TESTS = "ui_tests"
 
 
 @dataclass(frozen=True)

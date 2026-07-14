@@ -122,6 +122,65 @@ def test_get_task_detail_404(client: TestClient, _setup_env: Path) -> None:
     assert response.status_code == 404
 
 
+def test_get_task_artifact_serves_only_manifest_listed_file(
+    client: TestClient, _setup_env: Path
+) -> None:
+    db = _setup_env
+    task = state.upsert_task(
+        db,
+        Task(
+            repo="owner/repo",
+            issue_number=70,
+            issue_title="Artifact",
+            issue_body="Body",
+            issue_labels=("ui-agent-test",),
+        ),
+    )
+    relative = "attempt-1/screenshots/home.png"
+    target = db.parent / "artifacts" / f"task-{task.id}" / relative
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+    state.save_stage_result(
+        db,
+        task.id,
+        Stage.UI_TESTS,
+        {
+            "screenshots": [
+                {
+                    "name": "home.png",
+                    "artifact_path": relative,
+                    "mime_type": "image/png",
+                    "size_bytes": target.stat().st_size,
+                }
+            ]
+        },
+        attempt=1,
+    )
+
+    response = client.get(f"/api/tasks/{task.id}/artifacts/{relative}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert client.get(
+        f"/api/tasks/{task.id}/artifacts/attempt-1/screenshots/unlisted.png"
+    ).status_code == 404
+    assert client.get(
+        f"/api/tasks/{task.id}/artifacts/%2E%2E/task-999/secret.png"
+    ).status_code == 404
+    other = state.upsert_task(
+        db,
+        Task("owner/repo", 71, "Other task", "Body"),
+    )
+    state.save_stage_result(
+        db,
+        other.id,
+        Stage.UI_TESTS,
+        {"screenshots": [{"artifact_path": relative}]},
+        attempt=1,
+    )
+    assert client.get(f"/api/tasks/{other.id}/artifacts/{relative}").status_code == 404
+
+
 def test_get_task_event_history_pages_before_sequence(
     client: TestClient,
     _setup_env: Path,

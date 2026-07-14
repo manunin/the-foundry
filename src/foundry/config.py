@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
-from foundry.models import ForgeKind
+from foundry.models import ForgeKind, Task
 
 
 class ConfigError(RuntimeError):
@@ -34,6 +34,21 @@ class Settings:
     openspec_mode: bool = False
     forge: ForgeKind = ForgeKind.GITHUB
     forge_host: str = "github.com"
+    ui_test_label: str = "ui-agent-test"
+    ui_test_log_max_chars: int = 20_000
+    ui_test_artifact_max_files: int = 30
+    ui_test_artifact_max_file_bytes: int = 5_000_000
+    ui_test_artifact_max_attempt_bytes: int = 25_000_000
+
+    @property
+    def ui_test_artifact_root(self) -> Path:
+        return self.db_path.parent / "artifacts"
+
+
+def task_has_label(task: Task, label: str) -> bool:
+    labels = task.issue_labels
+    expected = label.casefold()
+    return any(str(item).casefold() == expected for item in labels)
 
 
 def _parse_csv(raw: str) -> tuple[str, ...]:
@@ -137,6 +152,20 @@ def load_settings(env_path: Path | None = None) -> Settings:
         ),
         forge=forge,
         forge_host=forge_host,
+        ui_test_label=os.environ.get("UI_TEST_LABEL", "ui-agent-test").strip()
+        or "ui-agent-test",
+        ui_test_log_max_chars=int(
+            os.environ.get("UI_TEST_LOG_MAX_CHARS", "20000")
+        ),
+        ui_test_artifact_max_files=int(
+            os.environ.get("UI_TEST_ARTIFACT_MAX_FILES", "30")
+        ),
+        ui_test_artifact_max_file_bytes=int(
+            os.environ.get("UI_TEST_ARTIFACT_MAX_FILE_BYTES", "5000000")
+        ),
+        ui_test_artifact_max_attempt_bytes=int(
+            os.environ.get("UI_TEST_ARTIFACT_MAX_ATTEMPT_BYTES", "25000000")
+        ),
     )
 
 

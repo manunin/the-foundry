@@ -38,6 +38,22 @@ def test_load_settings_defaults_base_branch_to_main(
     assert settings.base_branch == "main"
 
 
+def test_load_settings_parses_ui_test_limits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("SOURCE_REPO", "owner/sandbox")
+    monkeypatch.setenv("TARGET_REPO", "owner/sandbox")
+    monkeypatch.setenv("UI_TEST_LABEL", "browser-gate")
+    monkeypatch.setenv("UI_TEST_LOG_MAX_CHARS", "321")
+
+    settings = load_settings(env_path)
+
+    assert settings.ui_test_label == "browser-gate"
+    assert settings.ui_test_log_max_chars == 321
+
+
 def test_load_settings_parses_openspec_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

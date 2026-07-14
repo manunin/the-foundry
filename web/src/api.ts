@@ -84,6 +84,36 @@ export interface UiTask {
   stages: Record<string, UiStage>;
   memory: UiMemoryEntry[];
   events?: UiEvent[] | null;
+  ui_tests_enabled: boolean;
+}
+
+export interface UiCrawlerScenario {
+  name: string;
+  status: "passed" | "failed";
+  duration_ms: number;
+  error?: string | null;
+  screenshots: string[];
+}
+
+export interface UiCrawlerScreenshot {
+  name: string;
+  url: string;
+  mime_type: "image/png" | "image/jpeg" | "image/webp";
+  size_bytes: number;
+}
+
+export interface UiCrawlerResult {
+  passed: boolean;
+  retryable: boolean;
+  requires_human: boolean;
+  failure_kind?: string | null;
+  report: string;
+  deployed_url?: string | null;
+  scenarios: UiCrawlerScenario[];
+  screenshots: UiCrawlerScreenshot[];
+  core_logs?: string;
+  ui_logs?: string;
+  browser_logs?: string;
 }
 
 export interface RepoCount {

@@ -1,5 +1,40 @@
 # The Foundry
 
+## Optional UI crawler quality gate
+
+Create the additive `ui-agent-test` label once in the source repository (the
+normal queue label is still required):
+
+```bash
+gh label create ui-agent-test --repo owner/repo --color 1d76db
+glab label create --repo group/project --name ui-agent-test --color '#1d76db'
+```
+
+For labelled issues the pipeline becomes `implement -> verify -> ui_tests ->
+pr`. The planner reads the target repository's
+`.codex/skills/deploy-mac-mini-json-ui/SKILL.md` and defines crawler journeys,
+assertions, viewport, and screenshots. The UI-tests agent deploys the current
+task worktree and writes `.foundry/ui-tests/result.json`. Crawler assertion
+failures consume the shared implementation-attempt budget and feed bounded
+core, UI, and browser logs into the next attempt. Missing skills, SSH/browser
+failures, and malformed manifests block for operator action.
+
+Docker mounts `${HOST_SSH_DIR:-./.docker/ssh}` read-only at `/root/.ssh` in the
+worker only. Provision restrictive key permissions, `config`, and `known_hosts`
+on the host; the container cannot accept a new host key. Check the deploy alias:
+
+```bash
+docker compose run --rm worker ssh -G <alias>
+docker compose run --rm worker ssh -o BatchMode=yes <alias> true
+```
+
+Browser/MCP configuration remains in the Codex config mount. Configure
+`AGENT_UI_TESTS_BACKEND`, `AGENT_UI_TESTS_MODEL`,
+`AGENT_UI_TESTS_TIMEOUT_SEC`, and `AGENT_UI_TESTS_MAX_TURNS` as needed. Accepted
+screenshots are stored below `DB_PATH.parent/artifacts` and served through
+task-scoped API URLs. Worktree artifacts are removed. Logs must be redacted and
+are stored only as bounded tails; manifests must never reference credentials.
+
 Оркестратор «agentic feature pipeline»: GitHub issue → план → реализация → верификация → PR. Каждая задача проходит линейный FSM (`fetch → context → plan → implement → verify → pr → done`), исполняется в собственном git-worktree и пишет append-only лог событий в SQLite. Сверху живёт FastAPI + React UI с лайв-стримом (SSE) того, что делает агент.
 
 Проект сделан в рамках **Hacker Sprint #1: Фабрика фичей** ([Notion](https://www.notion.so/Hacker-Sprint-1-33f2db4c860e8064a657e199b4578f66?source=copy_link)).

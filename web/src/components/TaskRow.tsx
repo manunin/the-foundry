@@ -104,6 +104,7 @@ export default function TaskRow({ task, expanded, onToggle }: Props): JSX.Elemen
           current={liveTask.current_stage}
           size="sm"
           showLabels={false}
+          uiTestsEnabled={liveTask.ui_tests_enabled}
         />
 
         <span

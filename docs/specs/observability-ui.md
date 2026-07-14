@@ -1,5 +1,24 @@
 # Observability & Live UI
 
+## UI_TESTS contract
+
+The API exposes `ui_tests_enabled` on every task. When false, clients omit the
+`ui_tests` timeline entry. When true, `ui_tests` appears between `verify` and
+`pr` and is agent-backed for live event streaming without the ask-agent
+composer.
+
+`stage_started.input` includes the attempt, deploy-skill path, plan summary, and
+artifact limits. `stage_finished.output` uses the normal quality-gate fields
+plus `deployed_url`, scenarios, bounded `core_logs`, `ui_logs`, `browser_logs`,
+and screenshot metadata. Each screenshot contains an opaque `url`; no
+filesystem path is projected.
+
+`GET /api/tasks/{task_id}/artifacts/{artifact_path}` returns only an image listed
+by a persisted UI_TESTS result for that task. Traversal, cross-task paths,
+missing files, unsupported types, and unlisted files return 404. The Output tab
+shows aggregate counts, scenarios, collapsible diagnostics, and lazy-loaded
+screenshot links while retaining the generic payload fallback.
+
 Актуальный контракт observability-слоя Foundry. Источник архитектурного
 контекста — [../ARCHITECTURE.md](../ARCHITECTURE.md).
 

@@ -66,6 +66,55 @@ def test_project_task_aliases_current_stage() -> None:
     assert ui.current_stage == "agent_plan"
 
 
+def test_project_task_exposes_ui_tests_and_artifact_urls() -> None:
+    task = _task(issue_labels=("ui-agent-test",), current_stage=Stage.UI_TESTS)
+    events = [
+        _ev(1, "ui_tests", "stage_started", {"agent": {"name": "codex_cli"}}),
+        _ev(
+            2,
+            "ui_tests",
+            "stage_finished",
+            {
+                "duration_ms": 4,
+                "output": {
+                    "passed": True,
+                    "report": "green",
+                    "scenarios": [
+                        {
+                            "name": "home",
+                            "status": "passed",
+                            "duration_ms": 1,
+                            "error": None,
+                            "screenshots": ["screenshots/home.png"],
+                        }
+                    ],
+                    "screenshots": [
+                        {
+                            "name": "home.png",
+                            "artifact_path": "attempt-1/screenshots/home.png",
+                            "mime_type": "image/png",
+                            "size_bytes": 12,
+                        }
+                    ],
+                },
+            },
+        ),
+    ]
+
+    ui = project_task(task, events)
+
+    assert ui.ui_tests_enabled is True
+    assert ui.current_stage == "ui_tests"
+    screenshot = ui.stages["ui_tests"].output["screenshots"][0]
+    assert screenshot["url"] == (
+        "/api/tasks/1/artifacts/attempt-1/screenshots/home.png"
+    )
+    assert "artifact_path" not in screenshot
+    assert ui.stages["ui_tests"].output["scenarios"][0]["screenshots"] == [
+        screenshot["url"]
+    ]
+
+
 def test_project_task_tokens_aggregate() -> None:
     # Arrange
     task = _task()

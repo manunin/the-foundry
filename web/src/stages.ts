@@ -14,5 +14,10 @@ export const STAGES: StageMeta[] = [
   { id: "agent_plan", label: "plan", title: "Agent plan" },
   { id: "agent_implement", label: "implement", title: "Agent implement" },
   { id: "verify", label: "verify", title: "Verify" },
+  { id: "ui_tests", label: "ui tests", title: "UI crawler tests" },
   { id: "pr", label: "change", title: "Open change request" },
 ];
+
+export function stagesForTask(uiTestsEnabled: boolean): StageMeta[] {
+  return uiTestsEnabled ? STAGES : STAGES.filter((stage) => stage.id !== "ui_tests");
+}

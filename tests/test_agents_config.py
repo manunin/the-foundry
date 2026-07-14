@@ -84,6 +84,22 @@ def test_from_env_default_max_turns_per_stage_differs() -> None:
     assert implement.max_turns == 50
 
 
+def test_from_env_ui_tests_overrides_are_typed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_UI_TESTS_BACKEND", "codex_cli")
+    monkeypatch.setenv("AGENT_UI_TESTS_MODEL", "gpt-ui")
+    monkeypatch.setenv("AGENT_UI_TESTS_TIMEOUT_SEC", "900")
+    monkeypatch.setenv("AGENT_UI_TESTS_MAX_TURNS", "12")
+
+    settings = AgentSettings.from_env(AgentStage.UI_TESTS)
+
+    assert settings.backend == "codex_cli"
+    assert settings.model == "gpt-ui"
+    assert settings.timeout_sec == 900
+    assert settings.max_turns == 12
+
+
 def test_from_env_parses_safe_agent_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SAFE_AGENT_MODE", "false")
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from ..events import record_event
@@ -56,6 +57,30 @@ class StubAgent:
                     payload={"tool": "Bash", "detail": "echo ok"},
                 )
                 response = "PASS\nstub always verifies PASS"
+            case AgentStage.UI_TESTS:
+                output_dir = worktree / ".foundry" / "ui-tests"
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "result.json").write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "status": "passed",
+                            "deployed_url": "http://stub.invalid",
+                            "scenarios": [
+                                {
+                                    "name": "stub crawler",
+                                    "status": "passed",
+                                    "duration_ms": 1,
+                                    "error": None,
+                                    "screenshots": [],
+                                }
+                            ],
+                            "logs": {},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                response = "PASS\nstub crawler always passes"
             case _:
                 raise NotImplementedError(f"unknown stage: {self.stage!r}")
 

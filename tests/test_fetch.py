@@ -86,7 +86,14 @@ def test_fetch_issue_bypasses_queue_filters(tmp_path: Path) -> None:
         seen_cmd.extend(cmd)
         return Result(
             returncode=0,
-            stdout=json.dumps({"number": 7, "title": "manual", "body": "go"}),
+            stdout=json.dumps(
+                {
+                    "number": 7,
+                    "title": "manual",
+                    "body": "go",
+                    "labels": [{"name": "ui-agent-test"}],
+                }
+            ),
             stderr="",
         )
 
@@ -95,14 +102,58 @@ def test_fetch_issue_bypasses_queue_filters(tmp_path: Path) -> None:
 
     assert task.issue_number == 7
     assert task.issue_title == "manual"
+    assert task.issue_labels == ("ui-agent-test",)
     assert seen_cmd == [
         "gh",
         "issue",
         "view",
         "7",
         "--repo", "owner/sandbox",
-        "--json", "number,title,body",
+        "--json", "number,title,body,labels",
     ]
+
+
+def test_fetch_refreshes_labels_before_plan_and_freezes_after_plan(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    state.init_db(settings.db_path)
+    existing = state.upsert_task(
+        settings.db_path,
+        Task(
+            repo=settings.source_repo,
+            issue_number=4,
+            issue_title="old",
+            issue_body="old",
+            current_stage=Stage.CONTEXT,
+            issue_labels=("agent-task",),
+        ),
+    )
+    provider = MagicMock()
+    provider.list_issues.return_value = [
+        MagicMock(
+            number=4,
+            title="new",
+            body="new body",
+            labels=("agent-task", "ui-agent-test"),
+            url="https://example/issues/4",
+        )
+    ]
+    provider.list_issue_comments.return_value = []
+
+    fetch_stage.fetch(settings, provider)
+    refreshed = state.get_task(settings.db_path, existing.id)
+    assert refreshed.issue_labels == ("agent-task", "ui-agent-test")
+    assert refreshed.issue_title == "new"
+
+    refreshed.current_stage = Stage.PLAN
+    state.upsert_task(settings.db_path, refreshed)
+    provider.list_issues.return_value[0].labels = ("agent-task",)
+    fetch_stage.fetch(settings, provider)
+    assert state.get_task(settings.db_path, existing.id).issue_labels == (
+        "agent-task",
+        "ui-agent-test",
+    )
 
 
 def test_fetch_includes_pending_tasks_from_sqlite_queue(tmp_path: Path) -> None:
