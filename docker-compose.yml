@@ -40,6 +40,7 @@ services:
         INSTALL_OPENSPEC_CLI: ${INSTALL_OPENSPEC_CLI:-false}
     env_file:
       - .env
+      - ${SVFM_ENV_FILE:-C:/Users/TEMP.BPC/.svfm-mac-mini.env}
     environment:
       DB_PATH: /app/data/foundry.sqlite
       WORKTREE_ROOT: /app/worktrees
@@ -60,6 +61,7 @@ services:
       - ${HOST_CODEX_DIR:-./.docker/codex}:/root/.codex
       # UI crawler tasks use repository-owned deploy skills and operator-provisioned keys.
       - ${HOST_SSH_DIR:-./.docker/ssh}:/root/.ssh:ro
+      - ${SVFM_ENV_FILE:-C:/Users/TEMP.BPC/.svfm-mac-mini.env}:/root/.svfm-mac-mini.env:ro
       # - ${HOME}/.local/share/opencode:/root/.local/share/opencode
     command: ["foundry", "run"]
     depends_on:

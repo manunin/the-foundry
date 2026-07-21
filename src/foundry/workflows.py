@@ -214,7 +214,12 @@ def _build_attempt_input(
     """Augment implement input on retry with prior attempt + verifier feedback."""
     if attempt == 1:
         return plan_text
-    parts = [plan_text, f"\n\n## Attempt {attempt} — previous feedback\n"]
+    parts = [
+        plan_text,
+        f"\n\n## Attempt {attempt} — previous feedback\n",
+        "\nPreserve and review all existing task changes. Fix the validation "
+        "findings without removing already-correct implementation work.\n",
+    ]
     if previous_summary:
         parts.append(f"\n### Previous implement summary\n{previous_summary}\n")
     if previous_report:
@@ -287,6 +292,32 @@ def _build_pr_feedback_input(
         ]
     )
     return "\n".join(lines)
+
+
+def _build_openspec_pr_feedback_plan_input(
+    change: ForgeChange,
+    feedback: str,
+    openspec_context: str,
+) -> str:
+    return "\n".join(
+        [
+            "Update the existing OpenSpec change to address the latest "
+            "change-request feedback before implementation.",
+            "",
+            f"Change request: #{change.number} {change.title}".strip(),
+            f"Branch: `{change.branch}`",
+            f"URL: {change.url}",
+            "",
+            "## Existing OpenSpec context",
+            openspec_context.strip(),
+            "",
+            "## Feedback to plan",
+            feedback.strip(),
+            "",
+            "Create or update the OpenSpec proposal, design, specs, and tasks "
+            "needed for this feedback. Do not edit product code during PLAN.",
+        ]
+    )
 
 
 CI_CONFIG_PATH_MARKERS: tuple[str, ...] = (
@@ -667,9 +698,6 @@ def dev_task(
                 Stage.IMPLEMENT,
                 {"attempt": attempt, "checkpoint": str(checkpoint_path)},
             )
-            if attempt > 1:
-                security.reset_task_worktree(wt_path, settings.worktree_root)
-
             task = _mark(settings, task, stage=Stage.IMPLEMENT)
             impl_agent_settings = AgentSettings.from_env(
                 AgentStage.IMPLEMENT, db_path=settings.db_path
@@ -1015,8 +1043,8 @@ def pr_feedback(
 ) -> Task:
     """Apply requested PR feedback on the existing PR branch.
 
-    This is intentionally small: it records the external feedback, runs the
-    implement agent with that feedback, verifies the result, pushes one commit
+    It records the external feedback, updates OpenSpec artifacts first when
+    forced mode is enabled, implements and verifies the fix, pushes one commit
     back to the same branch, and posts a PR comment.
     """
     active_provider = provider or provider_for(settings)
@@ -1034,17 +1062,20 @@ def pr_feedback(
     task.branch_name = branch_name
     task.pr_url = change.url or task.pr_url
     task.status = TaskStatus.PENDING
-    task.current_stage = Stage.IMPLEMENT
+    feedback_start_stage = (
+        Stage.PLAN if settings.openspec_mode else Stage.IMPLEMENT
+    )
+    task.current_stage = feedback_start_stage
     task = state.upsert_task(settings.db_path, task)
     record_event(
         settings.db_path,
         task.id,
-        Stage.IMPLEMENT.value,
+        feedback_start_stage.value,
         "pr_feedback",
         {
             "workflow": WorkflowName.PR_FEEDBACK.value,
             "status": TaskStatus.PENDING.value,
-            "stage": Stage.IMPLEMENT.value,
+            "stage": feedback_start_stage.value,
             "forge": active_provider.kind.value,
             "change_number": change.number,
             "change_url": change.url,
@@ -1056,7 +1087,7 @@ def pr_feedback(
     state.append_log(
         settings.db_path,
         task.id,
-        Stage.IMPLEMENT,
+        feedback_start_stage,
         {
             "workflow": WorkflowName.PR_FEEDBACK.value,
             "change_number": change.number,
@@ -1071,124 +1102,265 @@ def pr_feedback(
     task.worktree_path = str(wt_path)
     task.status = TaskStatus.RUNNING
     task = state.upsert_task(settings.db_path, task)
+    feedback_task_description = task.issue_body.split(
+        "\n\n## Human clarification from issue comments", 1
+    )[0]
 
     try:
-        openspec_context = (
-            openspec.build_implementation_handoff(
-                wt_path,
-                timeout_sec=settings.verify_command_timeout_sec,
-                include_skill_bodies=False,
+        openspec_context = None
+        if settings.openspec_mode:
+            openspec_context = "\n".join(
+                openspec.format_context(
+                    openspec.collect_context(
+                        wt_path,
+                        timeout_sec=settings.verify_command_timeout_sec,
+                        forced=True,
+                    )
+                )
             )
-            if settings.openspec_mode
-            else None
-        )
-        implement_input = _build_pr_feedback_input(
-            change,
-            feedback_text,
-            openspec_context=openspec_context,
-        )
-        impl_agent_settings = AgentSettings.from_env(
-            AgentStage.IMPLEMENT, db_path=settings.db_path
-        )
-        impl_agent_settings = replace(
-            impl_agent_settings,
-            prompt_template="pr_feedback",
-        )
-        impl_agent_task = AgentTask(
-            id=task.id or task.issue_number,
-            title=task.issue_title,
-            description=task.issue_body,
-        )
-        impl_prompt = build_fresh_prompt(
-            AgentStage.IMPLEMENT,
-            impl_agent_task,
-            implement_input,
-            template_name=impl_agent_settings.prompt_template,
-        )
-        with stage_span(
-            settings.db_path,
-            task.id,
-            Stage.IMPLEMENT.value,
-            input={
-                "workflow": WorkflowName.PR_FEEDBACK.value,
-                "change_number": change.number,
-                "prompt": impl_prompt,
-            },
-            agent={
-                "name": impl_agent_settings.backend,
-                "model": impl_agent_settings.model,
-            },
-        ) as finish:
-            impl_result = agent_implement_stage.run(
-                task,
-                {"plan": implement_input, "_prompt_template": "pr_feedback"},
-                wt_path,
-                settings,
+        if settings.openspec_mode:
+            planner_input = _build_openspec_pr_feedback_plan_input(
+                change,
+                feedback_text,
+                openspec_context or "",
             )
-            finish(
-                output={
-                    "summary": impl_result.get("result", ""),
-                    "text": impl_result.get("response", ""),
-                },
-                cost_usd=impl_result.get("cost_usd"),
-                tokens_in=impl_result.get("tokens_in"),
-                tokens_out=impl_result.get("tokens_out"),
+            plan_agent_settings = AgentSettings.from_env(
+                AgentStage.PLAN, db_path=settings.db_path
             )
-        state.append_log(
-            settings.db_path,
-            task.id,
-            Stage.IMPLEMENT,
-            {**impl_result, "workflow": WorkflowName.PR_FEEDBACK.value},
-        )
-
-        if needs_human_input(impl_result.get("response") or impl_result.get("result")):
-            return _block_for_human(
-                settings,
-                task,
-                blocked_stage=Stage.IMPLEMENT,
-                reason="implement requested human verification while addressing PR feedback",
-                questions=strip_human_input_marker(
-                    impl_result.get("response") or impl_result.get("result")
-                ),
-                worktree_path=wt_path,
-                provider=active_provider,
+            plan_agent_settings = replace(
+                plan_agent_settings,
+                prompt_template="plan_openspec",
             )
-
-        task = _mark(settings, task, stage=Stage.VERIFY)
-        with stage_span(
-            settings.db_path,
-            task.id,
-            Stage.VERIFY.value,
-            input={
-                "workflow": WorkflowName.PR_FEEDBACK.value,
-                "change_number": change.number,
-            },
-        ) as finish:
-            verify_raw = verify_stage.run(
-                task, wt_path, settings, impl_result=impl_result
+            plan_agent_task = AgentTask(
+                id=task.id or task.issue_number,
+                title=task.issue_title,
+                description=feedback_task_description,
             )
-            decision = normalize_verification(verify_raw)
-            finish(
-                output={
-                    "passed": decision.passed,
-                    "retryable": decision.retryable,
-                    "requires_human": decision.requires_human,
-                    "failure_kind": decision.failure_kind,
-                    "report": decision.report,
+            plan_prompt = build_fresh_prompt(
+                AgentStage.PLAN,
+                plan_agent_task,
+                planner_input,
+                template_name=plan_agent_settings.prompt_template,
+            )
+            task = _mark(settings, task, stage=Stage.PLAN)
+            with stage_span(
+                settings.db_path,
+                task.id,
+                Stage.PLAN.value,
+                input={
                     "workflow": WorkflowName.PR_FEEDBACK.value,
-                }
+                    "change_number": change.number,
+                    "prompt": plan_prompt,
+                },
+                agent={
+                    "name": plan_agent_settings.backend,
+                    "model": plan_agent_settings.model,
+                },
+            ) as finish:
+                feedback_plan = agent_plan_stage.run(
+                    task,
+                    {},
+                    wt_path,
+                    settings,
+                    planner_input=planner_input,
+                )
+                finish(
+                    output={
+                        "summary": feedback_plan.get("summary", ""),
+                        "text": feedback_plan.get("plan", ""),
+                        "openspec_artifacts": feedback_plan.get(
+                            "openspec_artifacts", []
+                        ),
+                    },
+                    cost_usd=feedback_plan.get("cost_usd"),
+                    tokens_in=feedback_plan.get("tokens_in"),
+                    tokens_out=feedback_plan.get("tokens_out"),
+                )
+            state.append_log(
+                settings.db_path,
+                task.id,
+                Stage.PLAN,
+                {**feedback_plan, "workflow": WorkflowName.PR_FEEDBACK.value},
             )
-        state.append_log(
-            settings.db_path,
-            task.id,
-            Stage.VERIFY,
-            {
-                "workflow": WorkflowName.PR_FEEDBACK.value,
-                "passed": decision.passed,
-                "report": decision.report,
-            },
+            if needs_human_input(feedback_plan.get("plan")):
+                return _block_for_human(
+                    settings,
+                    task,
+                    blocked_stage=Stage.PLAN,
+                    reason=(
+                        "plan requested human verification while addressing "
+                        "PR feedback"
+                    ),
+                    questions=strip_human_input_marker(
+                        feedback_plan.get("plan")
+                    ),
+                    worktree_path=wt_path,
+                    provider=active_provider,
+                )
+            implementation_plan = {
+                **feedback_plan,
+                "_pr_feedback": feedback_text,
+            }
+            implement_input = ""
+            implement_template = "implement_openspec"
+        else:
+            implement_input = _build_pr_feedback_input(
+                change,
+                feedback_text,
+            )
+            implementation_plan = {
+                "plan": implement_input,
+                "_prompt_template": "pr_feedback",
+            }
+            implement_template = "pr_feedback"
+        max_attempts = max(1, settings.max_implement_attempts)
+        impl_result: dict[str, Any] = {}
+        decision = VerificationDecision(
+            passed=False,
+            retryable=False,
+            requires_human=False,
+            failure_kind=None,
+            report="",
+            raw={},
         )
-        if not decision.passed:
+        for attempt in range(1, max_attempts + 1):
+            attempt_plan = dict(implementation_plan)
+            if attempt > 1:
+                attempt_plan["_previous_implement_summary"] = impl_result.get(
+                    "result", ""
+                )
+                attempt_plan["_previous_verification_report"] = decision.report
+                if not settings.openspec_mode:
+                    attempt_plan["plan"] = _build_attempt_input(
+                        implement_input,
+                        attempt,
+                        previous_summary=impl_result.get("result", ""),
+                        previous_report=decision.report,
+                    )
+
+            impl_agent_settings = AgentSettings.from_env(
+                AgentStage.IMPLEMENT, db_path=settings.db_path
+            )
+            impl_agent_settings = replace(
+                impl_agent_settings,
+                prompt_template=implement_template,
+            )
+            impl_input = agent_implement_stage.build_agent_input(
+                attempt_plan,
+                wt_path,
+                settings,
+            )
+            impl_agent_task = AgentTask(
+                id=task.id or task.issue_number,
+                title=task.issue_title,
+                description=feedback_task_description,
+            )
+            impl_prompt = build_fresh_prompt(
+                AgentStage.IMPLEMENT,
+                impl_agent_task,
+                impl_input,
+                template_name=impl_agent_settings.prompt_template,
+            )
+            task = _mark(settings, task, stage=Stage.IMPLEMENT)
+            with stage_span(
+                settings.db_path,
+                task.id,
+                Stage.IMPLEMENT.value,
+                input={
+                    "workflow": WorkflowName.PR_FEEDBACK.value,
+                    "change_number": change.number,
+                    "prompt": impl_prompt,
+                    "attempt": attempt,
+                },
+                agent={
+                    "name": impl_agent_settings.backend,
+                    "model": impl_agent_settings.model,
+                },
+            ) as finish:
+                impl_result = agent_implement_stage.run(
+                    task,
+                    attempt_plan,
+                    wt_path,
+                    settings,
+                )
+                finish(
+                    output={
+                        "summary": impl_result.get("result", ""),
+                        "text": impl_result.get("response", ""),
+                        "attempt": attempt,
+                    },
+                    cost_usd=impl_result.get("cost_usd"),
+                    tokens_in=impl_result.get("tokens_in"),
+                    tokens_out=impl_result.get("tokens_out"),
+                )
+            state.append_log(
+                settings.db_path,
+                task.id,
+                Stage.IMPLEMENT,
+                {
+                    **impl_result,
+                    "workflow": WorkflowName.PR_FEEDBACK.value,
+                    "attempt": attempt,
+                },
+            )
+
+            if needs_human_input(
+                impl_result.get("response") or impl_result.get("result")
+            ):
+                return _block_for_human(
+                    settings,
+                    task,
+                    blocked_stage=Stage.IMPLEMENT,
+                    reason=(
+                        "implement requested human verification while addressing "
+                        f"PR feedback on attempt {attempt}"
+                    ),
+                    questions=strip_human_input_marker(
+                        impl_result.get("response") or impl_result.get("result")
+                    ),
+                    worktree_path=wt_path,
+                    provider=active_provider,
+                )
+
+            task = _mark(settings, task, stage=Stage.VERIFY)
+            with stage_span(
+                settings.db_path,
+                task.id,
+                Stage.VERIFY.value,
+                input={
+                    "workflow": WorkflowName.PR_FEEDBACK.value,
+                    "change_number": change.number,
+                    "attempt": attempt,
+                },
+            ) as finish:
+                verify_raw = verify_stage.run(
+                    task, wt_path, settings, impl_result=impl_result
+                )
+                decision = normalize_verification(verify_raw)
+                finish(
+                    output={
+                        "passed": decision.passed,
+                        "retryable": decision.retryable,
+                        "requires_human": decision.requires_human,
+                        "failure_kind": decision.failure_kind,
+                        "report": decision.report,
+                        "workflow": WorkflowName.PR_FEEDBACK.value,
+                        "attempt": attempt,
+                    }
+                )
+            state.append_log(
+                settings.db_path,
+                task.id,
+                Stage.VERIFY,
+                {
+                    "workflow": WorkflowName.PR_FEEDBACK.value,
+                    "attempt": attempt,
+                    "passed": decision.passed,
+                    "report": decision.report,
+                },
+            )
+            if decision.passed:
+                break
             if decision.requires_human:
                 return _block_for_human(
                     settings,
@@ -1199,9 +1371,15 @@ def pr_feedback(
                     worktree_path=wt_path,
                     provider=active_provider,
                 )
-            raise RuntimeError(
-                "PR feedback fix did not pass verification: " + decision.report
-            )
+            if not decision.retryable:
+                raise RuntimeError(
+                    "PR feedback fix failed non-retryably: " + decision.report
+                )
+            if attempt >= max_attempts:
+                raise RuntimeError(
+                    f"PR feedback fix failed after {attempt} attempts: "
+                    + decision.report
+                )
 
         _guard_pr_feedback_ci_config_edits(
             feedback,

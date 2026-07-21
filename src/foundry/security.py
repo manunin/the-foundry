@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import subprocess
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 
 TRUTHY = {"1", "true", "yes", "on"}
@@ -29,6 +32,10 @@ BACKEND_SECRET_ALLOWLIST: dict[str, set[str]] = {
         "OPENROUTER_API_KEY",
     },
 }
+
+
+class GitRemoteMutationError(RuntimeError):
+    pass
 
 
 def is_safe_agent_mode(raw: str | None = None) -> bool:
@@ -60,6 +67,12 @@ def assert_command_allowed(
     if cmd[0] != "git":
         return
     args = cmd[1:]
+    if _is_git_push(args):
+        raise RuntimeError("refusing unsafe shell command: git push is orchestrator-only")
+    if _is_git_remote_mutation(args):
+        raise RuntimeError(
+            "refusing unsafe shell command: git remote mutation is denied"
+        )
     if _is_git_force_push(args):
         raise RuntimeError("refusing unsafe shell command: git push --force is denied")
     if _is_git_checkout_main(args) and _is_task_worktree(cwd, worktree_root):
@@ -68,6 +81,21 @@ def assert_command_allowed(
         raise RuntimeError(
             "refusing unsafe shell command: git reset --hard outside task worktree"
         )
+
+
+@contextmanager
+def preserve_git_origin(worktree_path: Path) -> Iterator[None]:
+    """Restore and reject agent mutations to the shared worktree origin."""
+    original = _git_origin(worktree_path)
+    try:
+        yield
+    finally:
+        current = _git_origin(worktree_path)
+        if current != original:
+            _set_git_origin(worktree_path, original)
+            raise GitRemoteMutationError(
+                "agent changed git remote origin; the shared remote was restored"
+            )
 
 
 def checkpoint_diff(
@@ -109,6 +137,40 @@ def _is_git_force_push(args: list[str]) -> bool:
         arg == "--force" or arg == "-f" or arg.startswith("--force-with-lease")
         for arg in args[1:]
     )
+
+
+def _is_git_push(args: list[str]) -> bool:
+    return bool(args) and args[0] == "push"
+
+
+def _is_git_remote_mutation(args: list[str]) -> bool:
+    return len(args) >= 2 and args[0] == "remote" and args[1] in {
+        "add",
+        "remove",
+        "rename",
+        "set-url",
+    }
+
+
+def _git_origin(worktree_path: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=worktree_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _set_git_origin(worktree_path: Path, origin: str | None) -> None:
+    if origin is None:
+        command = ["git", "remote", "remove", "origin"]
+    elif _git_origin(worktree_path) is None:
+        command = ["git", "remote", "add", "origin", origin]
+    else:
+        command = ["git", "remote", "set-url", "origin", origin]
+    subprocess.run(command, cwd=worktree_path, check=True)
 
 
 def _is_git_checkout_main(args: list[str]) -> bool:

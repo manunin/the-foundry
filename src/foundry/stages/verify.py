@@ -104,13 +104,6 @@ def run(
 
     det_summary = _format_summary(det_outputs)
 
-    if settings.openspec_mode and _openspec_validate_passed(det_outputs):
-        return {
-            "passed": True,
-            "report": "OpenSpec validation passed",
-            "stdout": det_summary,
-        }
-
     if not cmds and _agent_backend_is_stub(settings):
         log.warning("verify.no_checks_configured", task_id=task.id)
         return {
@@ -138,12 +131,30 @@ def run(
         )
     try:
         agent_res = agent_verify_stage.run(task, worktree_path, diff_text, settings)
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, RuntimeError) as e:
+    except subprocess.TimeoutExpired as error:
+        if settings.openspec_mode and _openspec_validate_passed(det_outputs):
+            return {
+                "passed": True,
+                "report": "OpenSpec validation passed; acceptance review timed out",
+                "stdout": det_summary,
+            }
+        return _infra_result(
+            "agent_verify", str(error), retryable=True, requires_human=False
+        )
+    except (subprocess.CalledProcessError, RuntimeError) as e:
         return _infra_result(
             "agent_verify", str(e), retryable=True, requires_human=False
         )
 
     response = agent_res.get("response", "")
+    if not response.strip() and settings.openspec_mode and _openspec_validate_passed(
+        det_outputs
+    ):
+        return {
+            "passed": True,
+            "report": "OpenSpec validation passed; acceptance review returned no verdict",
+            "stdout": det_summary,
+        }
     verdict = _parse_verdict(response)
     if verdict == "PASS":
         return {

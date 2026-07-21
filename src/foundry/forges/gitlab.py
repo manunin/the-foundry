@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime
 import json
 import os
-from pathlib import Path
+import re
+from datetime import datetime
+from pathlib import Path, PurePosixPath
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, unquote, urlencode
 from urllib.request import Request, urlopen
 
+from foundry import shell
 from foundry.forges.base import (
     ChangeFeedback,
     ChangeRequestInput,
@@ -25,6 +27,42 @@ from foundry.models import ForgeKind
 
 MAX_JOB_TRACE_CHARS = 6000
 MAX_JOB_TRACE_LINES = 80
+MAX_ISSUE_ATTACHMENTS = 10
+MAX_ATTACHMENT_CHARS = 50_000
+MAX_ATTACHMENTS_TOTAL_CHARS = 150_000
+TEXT_ATTACHMENT_SUFFIXES = {
+    ".c",
+    ".conf",
+    ".cpp",
+    ".csv",
+    ".gradle",
+    ".h",
+    ".hpp",
+    ".ini",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".log",
+    ".md",
+    ".properties",
+    ".ps1",
+    ".py",
+    ".rs",
+    ".sh",
+    ".sql",
+    ".toml",
+    ".ts",
+    ".tsv",
+    ".tsx",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+UPLOAD_LINK_RE = re.compile(
+    r"/uploads/(?P<secret>[A-Za-z0-9_-]+)/(?P<filename>[^\s)\]?#]+)"
+)
 
 
 class GitLabProvider:
@@ -172,10 +210,11 @@ class GitLabProvider:
             labels_value = value.get("labels") or []
             if not isinstance(labels_value, list):
                 raise TypeError
+            description = str(value.get("description") or "")
             return ForgeIssue(
                 int(value["iid"]),
                 str(value["title"]),
-                str(value.get("description") or ""),
+                self._include_attachments(project, description),
                 tuple(str(label) for label in labels_value),
                 str(value["web_url"]),
             )
@@ -203,7 +242,10 @@ class GitLabProvider:
             comments.append(
                 ForgeComment(
                     external_id=str(value.get("id") or ""),
-                    body=str(value.get("body") or "").strip(),
+                    body=self._include_attachments(
+                        project,
+                        str(value.get("body") or "").strip(),
+                    ),
                     author=(
                         str(author.get("username") or "unknown")
                         if isinstance(author, dict)
@@ -213,6 +255,74 @@ class GitLabProvider:
                 )
             )
         return comments
+
+    def _include_attachments(self, project: str, markdown: str) -> str:
+        attachments: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        total_chars = 0
+        for match in UPLOAD_LINK_RE.finditer(markdown):
+            secret = match.group("secret")
+            filename = unquote(match.group("filename"))
+            identity = (secret, filename)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if len(seen) > MAX_ISSUE_ATTACHMENTS:
+                attachments.append(
+                    f"- Additional attachments omitted after {MAX_ISSUE_ATTACHMENTS} files."
+                )
+                break
+
+            source = match.group(0)
+            suffix = PurePosixPath(filename).suffix.lower()
+            if suffix not in TEXT_ATTACHMENT_SUFFIXES:
+                attachments.append(
+                    f"### `{filename}`\n"
+                    f"Source: `{source}`\n\n"
+                    "Binary or unsupported attachment; content was not included."
+                )
+                continue
+
+            endpoint = (
+                f"/projects/{self._project(project)}/uploads/"
+                f"{quote(secret, safe='')}/{quote(filename, safe='')}"
+            )
+            try:
+                content = self._raw_api(endpoint)
+            except (ForgeError, shell.ShellError) as error:
+                attachments.append(
+                    f"### `{filename}`\n"
+                    f"Source: `{source}`\n\n"
+                    f"Attachment could not be loaded: {type(error).__name__}."
+                )
+                continue
+
+            remaining = MAX_ATTACHMENTS_TOTAL_CHARS - total_chars
+            if remaining <= 0:
+                attachments.append(
+                    "- Remaining textual attachments omitted because the total "
+                    "attachment context limit was reached."
+                )
+                break
+            included = content[: min(MAX_ATTACHMENT_CHARS, remaining)]
+            total_chars += len(included)
+            truncation = (
+                "\n\n[Attachment content truncated by The Foundry.]"
+                if len(included) < len(content)
+                else ""
+            )
+            safe_content = included.replace("```", "``\u200b`")
+            attachments.append(
+                f"### `{filename}`\n"
+                f"Source: `{source}`\n\n"
+                f"```text\n{safe_content}\n```{truncation}"
+            )
+
+        if not attachments:
+            return markdown
+        return "\n\n".join(
+            [markdown.rstrip(), "## GitLab issue attachments", *attachments]
+        ).strip()
 
     def close_issue(self, project: str, number: int, comment: str) -> None:
         self.comment_issue(project, number, comment)

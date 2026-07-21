@@ -1,5 +1,31 @@
 # The Foundry — Architecture Reference
 
+## GitLab issue attachments
+
+The GitLab forge adapter resolves `/uploads/<secret>/<filename>` links found in
+issue descriptions and human clarification comments. Bounded textual files are
+downloaded through the authenticated project uploads API and appended to the
+task text before agent stages run. Duplicate links are fetched once; binary or
+unsupported files are identified but not embedded. Per-file, file-count, and
+total-context limits prevent attachments from overwhelming agent prompts.
+
+## OpenSpec PR feedback and behavioral acceptance
+
+With `FOUNDRY_OPENSPEC_MODE=true`, actionable PR feedback follows
+`PLAN -> IMPLEMENT -> VERIFY -> PR`. PLAN updates the existing OpenSpec change
+and records the generated artifact paths; IMPLEMENT receives those paths and
+the feedback explicitly. Retryable verification failures follow the normal
+IMPLEMENT/VERIFY attempt budget: the same worktree is retained, and the next
+IMPLEMENT attempt receives the previous implementation summary and verification
+report so it can correct the fix without reverting already-valid changes.
+`openspec validate` remains a deterministic gate, and
+the reviewer normally must also confirm that the diff fixes the requested
+behavior. If that review times out or returns no verdict after
+`openspec validate --all --json` succeeds, VERIFY accepts the deterministic
+OpenSpec result as a fallback. For error and exception tasks, logging or
+error-message-only changes fail acceptance unless observability text was the
+explicit work item.
+
 ## Label-gated UI crawler stage
 
 `Task.issue_labels` is a persisted snapshot of normalized forge labels. Labels
@@ -33,6 +59,11 @@ default; GitLab (`glab`) выбирается через `FORGE_PROVIDER=gitlab`
 Issue operations идут в `SOURCE_REPO`, а clone/push/change-request operations —
 в `TARGET_REPO`.
 
+Agent stages cannot own repository publication. Foundry rejects agent-path
+`git push` and `git remote` mutations, snapshots `origin` around PLAN and
+IMPLEMENT execution, and restores the shared remote before failing the stage if
+an agent changes it. Only the orchestrator PR stage may bypass these guards.
+
 Blocked-задачи проверяют issue comments при каждом polling pass. Первый новый
 неслужебный комментарий после блокировки добавляется в task context. Completed
 upstream stages и worktree сохраняются; предыдущий planning draft передаётся
@@ -54,7 +85,7 @@ Processed comment IDs фиксируются append-only событием
 | 1 | **FETCH** | `stages/fetch.py` | Детерм. | `gh issue list` по `SOURCE_REPO` + `ISSUE_LABELS`/`ISSUE_ASSIGNEE`/`ISSUE_MILESTONE`/`ISSUE_LIMIT`. Сортировка по `priority/p0`→`p1`. Upsert в SQLite. |
 | 2 | **CONTEXT** | `stages/context.py` | Детерм. | Анализирует worktree: языки, манифесты, ключевые слова из issue, релевантные файлы (TF-IDF по ключевым словам), test-команды. Читает `repo_memory` (touched_files, verify_commands, common_failures из предыдущих задач). |
 | 3 | **PLAN** | `stages/agent_plan.py` | Недетерм. | Агент генерирует план реализации. Если агент завершает ответ маркером `NEED_VERIFICATION` — workflow блокируется, публикует комментарий в issue (`stages/issue_comment.py`) и ставит статус `BLOCKED`. |
-| 4 | **IMPLEMENT** | `stages/agent_implement.py` | Недетерм. | Агент пишет код в worktree. Перед каждой попыткой сохраняется checkpoint (`git diff --binary HEAD → data/checkpoints/task-{id}-attempt-{n}-pre.diff`). При retry — `git reset --hard HEAD` и повтор с feedback предыдущей попытки. |
+| 4 | **IMPLEMENT** | `stages/agent_implement.py` | Недетерм. | Агент пишет код в worktree. Перед каждой попыткой сохраняется checkpoint (`git diff --binary HEAD → data/checkpoints/task-{id}-attempt-{n}-pre.diff`). При retry сохраняются изменения предыдущей попытки, а агент получает feedback верификатора для инкрементального исправления. |
 | 5 | **VERIFY** | `stages/verify.py` | Смешанная | Двухуровневая: ① детерминированные команды (pytest / ruff / cargo test / npm test — `check=False`, короткое замыкание при ненулевом rc); ② LLM-ревьюер на diff (недетерм., только если детерм. прошли). |
 | 6 | **PR** | `stages/pr.py` | Детерм. | `git add -A` → `git commit` → `git push -u origin foundry/task-{id}` → `gh pr create`. Закрывает issue комментарием со ссылкой на PR. |
 | 7 | **DONE** | `workflows.py` | Детерм. | Worktree удаляется. Запись `repo_memory` (touched_files, verify_commands, common_failures). |

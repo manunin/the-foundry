@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,8 +39,47 @@ def test_shell_guard_denies_rm_rf() -> None:
 
 
 def test_shell_guard_denies_force_push() -> None:
-    with pytest.raises(RuntimeError, match="push --force"):
+    with pytest.raises(RuntimeError, match="orchestrator-only"):
         security.assert_command_allowed(["git", "push", "--force", "origin", "main"])
+
+
+def test_shell_guard_denies_regular_push() -> None:
+    with pytest.raises(RuntimeError, match="orchestrator-only"):
+        security.assert_command_allowed(["git", "push", "origin", "feature"])
+
+
+def test_shell_guard_denies_remote_mutation() -> None:
+    with pytest.raises(RuntimeError, match="remote mutation"):
+        security.assert_command_allowed(
+            ["git", "remote", "set-url", "origin", "git@example.test:repo.git"]
+        )
+
+
+def test_agent_remote_mutation_is_restored(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    original = "http://gitlab.example/group/project.git"
+    subprocess.run(
+        ["git", "remote", "add", "origin", original],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    with pytest.raises(RuntimeError, match="shared remote was restored"):
+        with security.preserve_git_origin(tmp_path):
+            subprocess.run(
+                ["git", "remote", "set-url", "origin", "git@gitlab.example:x.git"],
+                cwd=tmp_path,
+                check=True,
+            )
+
+    restored = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert restored.stdout.strip() == original
 
 
 def test_shell_guard_allows_reset_hard_inside_task_worktree(tmp_path: Path) -> None:

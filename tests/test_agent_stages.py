@@ -85,11 +85,19 @@ def test_agent_plan_uses_openspec_prompt_template_in_forced_mode(tmp_path: Path)
     settings = replace(_settings(tmp_path), openspec_mode=True)
     fake = _fake_agent(AgentStage.PLAN, response="openspec artifacts", result="openspec")
 
-    with patch("foundry.stages.agent_plan.make_agent", return_value=fake) as make:
-        agent_plan.run(_task(), ctx={}, worktree_path=tmp_path, settings=settings)
+    with patch("foundry.stages.agent_plan.make_agent", return_value=fake) as make, patch(
+        "foundry.stages.agent_plan.openspec.changed_artifact_paths",
+        return_value=["openspec/changes/add-api/tasks.md"],
+    ):
+        result = agent_plan.run(
+            _task(), ctx={}, worktree_path=tmp_path, settings=settings
+        )
 
     assert make.call_args.args[0].stage is AgentStage.PLAN
     assert make.call_args.args[0].prompt_template == "plan_openspec"
+    assert result["openspec_artifacts"] == [
+        "openspec/changes/add-api/tasks.md"
+    ]
 
 
 def test_agent_plan_falls_back_to_issue_number_when_task_has_no_db_id(tmp_path: Path) -> None:
@@ -136,6 +144,7 @@ def test_agent_implement_uses_openspec_handoff_in_forced_mode(tmp_path: Path) ->
     settings = replace(_settings(tmp_path), openspec_mode=True)
     plan = {
         "plan": "Let me explore the repository.\nNow I have enough information.",
+        "openspec_artifacts": ["openspec/changes/add-api/tasks.md"],
     }
     fake = _fake_agent(
         AgentStage.IMPLEMENT,
@@ -161,6 +170,7 @@ def test_agent_implement_uses_openspec_handoff_in_forced_mode(tmp_path: Path) ->
     handoff.assert_called_once_with(
         tmp_path,
         timeout_sec=settings.verify_command_timeout_sec,
+        plan_artifacts=["openspec/changes/add-api/tasks.md"],
     )
     assert fake.apply.call_args.kwargs["input"].startswith(
         "## OpenSpec implementation handoff"
@@ -205,6 +215,30 @@ def test_agent_implement_appends_retry_feedback_to_openspec_handoff(
     assert "changed spec files" in agent_input
     assert "Change must have at least one delta" in agent_input
     assert "generic planner transcript" not in agent_input
+
+
+def test_agent_implement_appends_pr_feedback_to_openspec_handoff(
+    tmp_path: Path,
+) -> None:
+    settings = replace(_settings(tmp_path), openspec_mode=True)
+
+    with patch(
+        "foundry.stages.agent_implement.openspec.build_implementation_handoff",
+        return_value="## OpenSpec implementation handoff",
+    ):
+        agent_input = agent_implement.build_agent_input(
+            {
+                "plan": "planner transcript",
+                "openspec_artifacts": ["openspec/changes/demo/tasks.md"],
+                "_pr_feedback": "Fix the null handling and add a regression test.",
+            },
+            tmp_path,
+            settings,
+        )
+
+    assert "## PR feedback to address" in agent_input
+    assert "Fix the null handling" in agent_input
+    assert "planner transcript" not in agent_input
 
 
 def test_agent_implement_pr_feedback_template_overrides_openspec_mode(

@@ -6,8 +6,10 @@ from pathlib import Path
 from langfuse import observe
 
 from ..agents import AgentSettings, AgentStage, AgentTask, make_agent
+from .. import security
 from ..config import Settings
 from ..models import Task
+from . import openspec
 from .context import format_for_prompt
 
 
@@ -33,12 +35,13 @@ def run(
         title=task.issue_title,
         description=task.issue_body,
     )
-    r = agent.apply(
-        task=agent_task,
-        worktree=worktree_path,
-        input=planner_input if planner_input is not None else format_for_prompt(ctx),
-    )
-    return {
+    with security.preserve_git_origin(worktree_path):
+        r = agent.apply(
+            task=agent_task,
+            worktree=worktree_path,
+            input=planner_input if planner_input is not None else format_for_prompt(ctx),
+        )
+    result = {
         "agent": agent.name,
         "stage": r.stage.value,
         "plan": r.response,
@@ -47,3 +50,6 @@ def run(
         "tokens_in": r.tokens_in,
         "tokens_out": r.tokens_out,
     }
+    if settings.openspec_mode:
+        result["openspec_artifacts"] = openspec.changed_artifact_paths(worktree_path)
+    return result

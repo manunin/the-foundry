@@ -182,11 +182,18 @@ def test_dev_task_pass_after_retry_opens_pr(tmp_path: Path) -> None:
     settings = _settings(tmp_path, max_implement_attempts=3)
     state.init_db(settings.db_path)
     seeded = _seed_task(settings.db_path)
+    worktree_path = tmp_path / "wt"
+    worktree_path.mkdir()
 
     implement_calls: list[dict] = []
 
     def _implement_run(task, plan, worktree_path, settings):
         implement_calls.append(plan)
+        product_file = worktree_path / "product.txt"
+        if len(implement_calls) == 1:
+            product_file.write_text("first-attempt fix", encoding="utf-8")
+        else:
+            assert product_file.read_text(encoding="utf-8") == "first-attempt fix"
         return {"result": f"attempt-{len(implement_calls)}", "response": ""}
 
     verify_results = iter([
@@ -194,9 +201,13 @@ def test_dev_task_pass_after_retry_opens_pr(tmp_path: Path) -> None:
         {"passed": True, "report": "green"},
     ])
 
+    dev_task_patches = _dev_task_patches(tmp_path)
+    dev_task_patches["foundry.workflows.security.reset_task_worktree"] = {
+        "side_effect": lambda *args: (worktree_path / "product.txt").unlink()
+    }
     ctxs = [
         patch("foundry.pipeline.fetch_stage.fetch", return_value=[seeded]),
-        *[patch(target, **kwargs) for target, kwargs in _dev_task_patches(tmp_path).items()],
+        *[patch(target, **kwargs) for target, kwargs in dev_task_patches.items()],
         patch("foundry.workflows.agent_implement_stage.run", side_effect=_implement_run),
         patch("foundry.workflows.verify_stage.run", side_effect=lambda *a, **kw: next(verify_results)),
     ]
@@ -213,6 +224,7 @@ def test_dev_task_pass_after_retry_opens_pr(tmp_path: Path) -> None:
     # Implement was called twice; second call received the prior verification report.
     assert len(implement_calls) == 2
     assert "missing file" in implement_calls[1]["plan"]
+    assert "Preserve and review all existing task changes" in implement_calls[1]["plan"]
 
     # Events should show two implement spans with attempt numbers and two verify spans.
     events = read_events(settings.db_path, task_id=final.id)

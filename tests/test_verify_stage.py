@@ -455,7 +455,9 @@ def test_verify_commands_env_replaces_autodetect(tmp_path: Path) -> None:
     assert det_cmds == [["true"]]
 
 
-def test_forced_openspec_appends_validate_and_skips_agent(tmp_path: Path) -> None:
+def test_forced_openspec_appends_validate_and_runs_acceptance_review(
+    tmp_path: Path,
+) -> None:
     wt = tmp_path / "wt"
     wt.mkdir()
     settings = _settings(
@@ -474,19 +476,168 @@ def test_forced_openspec_appends_validate_and_skips_agent(tmp_path: Path) -> Non
         "validate_command",
         return_value=["openspec", "validate", "--all", "--json"],
     ), patch.object(verify_stage.shell, "run", side_effect=_run), patch.object(
-        verify_stage.agent_verify_stage, "run"
+        verify_stage.agent_verify_stage,
+        "run",
+        return_value={"response": "PASS\nFunctional fix verified"},
     ) as agent_mock:
         result = verify_stage.run(_task(), wt, settings)
 
     assert result["passed"] is True
-    assert result["report"] == "OpenSpec validation passed"
+    assert result["report"] == "PASS\nFunctional fix verified"
     assert "true \u2192 ok" in result["stdout"]
     assert "openspec validate --all --json \u2192 ok" in result["stdout"]
     assert [cmd for cmd in seen_cmds if cmd[0] != "git"] == [
         ["true"],
         ["openspec", "validate", "--all", "--json"],
     ]
-    agent_mock.assert_not_called()
+    agent_mock.assert_called_once()
+
+
+def test_forced_openspec_rejects_logging_only_error_fix(tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    settings = _settings(
+        tmp_path,
+        verify_commands=(("true",),),
+        openspec_mode=True,
+    )
+
+    with patch.object(
+        verify_stage.openspec,
+        "validate_command",
+        return_value=["openspec", "validate", "--all", "--json"],
+    ), patch.object(
+        verify_stage.shell,
+        "run",
+        side_effect=_shell_router(
+            {("true",): _ok(), ("openspec",): _ok("{}")}
+        ),
+    ), patch.object(
+        verify_stage.agent_verify_stage,
+        "run",
+        return_value={
+            "response": (
+                "FAIL: logging does not fix the exception\n"
+                "The diff changes only error-message representation."
+            )
+        },
+    ):
+        result = verify_stage.run(_task(), wt, settings)
+
+    assert result["passed"] is False
+    assert result["retryable"] is True
+    assert result["failure_kind"] == "acceptance"
+    assert "logging does not fix" in result["report"]
+
+
+def test_forced_openspec_agent_timeout_uses_successful_validation(tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    settings = _settings(
+        tmp_path,
+        verify_commands=(("true",),),
+        openspec_mode=True,
+    )
+
+    with patch.object(
+        verify_stage.openspec,
+        "validate_command",
+        return_value=["openspec", "validate", "--all", "--json"],
+    ), patch.object(
+        verify_stage.shell,
+        "run",
+        side_effect=_shell_router(
+            {("true",): _ok(), ("openspec",): _ok("{}")}
+        ),
+    ), patch.object(
+        verify_stage.agent_verify_stage,
+        "run",
+        side_effect=subprocess.TimeoutExpired(cmd=["opencode"], timeout=600),
+    ):
+        result = verify_stage.run(_task(), wt, settings)
+
+    assert result["passed"] is True
+    assert result["report"] == (
+        "OpenSpec validation passed; acceptance review timed out"
+    )
+    assert "openspec validate --all --json → ok" in result["stdout"]
+
+
+def test_forced_openspec_empty_agent_result_uses_successful_validation(
+    tmp_path: Path,
+) -> None:
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    settings = _settings(
+        tmp_path,
+        verify_commands=(("true",),),
+        openspec_mode=True,
+    )
+
+    with patch.object(
+        verify_stage.openspec,
+        "validate_command",
+        return_value=["openspec", "validate", "--all", "--json"],
+    ), patch.object(
+        verify_stage.shell,
+        "run",
+        side_effect=_shell_router(
+            {("true",): _ok(), ("openspec",): _ok("{}")}
+        ),
+    ), patch.object(
+        verify_stage.agent_verify_stage,
+        "run",
+        return_value={"response": ""},
+    ):
+        result = verify_stage.run(_task(), wt, settings)
+
+    assert result["passed"] is True
+    assert result["report"] == (
+        "OpenSpec validation passed; acceptance review returned no verdict"
+    )
+    assert "openspec validate --all --json → ok" in result["stdout"]
+
+
+def test_empty_agent_result_without_openspec_requires_human(tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    settings = _settings(tmp_path, verify_commands=(("true",),))
+
+    with patch.object(
+        verify_stage.shell,
+        "run",
+        side_effect=_shell_router({("true",): _ok()}),
+    ), patch.object(
+        verify_stage.agent_verify_stage,
+        "run",
+        return_value={"response": ""},
+    ):
+        result = verify_stage.run(_task(), wt, settings)
+
+    assert result["passed"] is False
+    assert result["failure_kind"] == "unclear"
+    assert result["requires_human"] is True
+
+
+def test_agent_timeout_without_openspec_remains_infra(tmp_path: Path) -> None:
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    settings = _settings(tmp_path, verify_commands=(("true",),))
+
+    with patch.object(
+        verify_stage.shell,
+        "run",
+        side_effect=_shell_router({("true",): _ok()}),
+    ), patch.object(
+        verify_stage.agent_verify_stage,
+        "run",
+        side_effect=subprocess.TimeoutExpired(cmd=["opencode"], timeout=600),
+    ):
+        result = verify_stage.run(_task(), wt, settings)
+
+    assert result["passed"] is False
+    assert result["failure_kind"] == "infra"
+    assert result["retryable"] is True
 
 
 def test_forced_openspec_requires_validate_command(tmp_path: Path) -> None:

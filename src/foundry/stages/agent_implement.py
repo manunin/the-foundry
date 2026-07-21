@@ -5,7 +5,7 @@ from pathlib import Path
 
 from langfuse import observe
 
-from .. import shell
+from .. import security, shell
 from ..agents import AgentSettings, AgentStage, AgentTask, make_agent
 from ..config import Settings
 from ..models import Task
@@ -37,7 +37,10 @@ def run(task: Task, plan: dict, worktree_path: Path, settings: Settings) -> dict
     )
     plan_text = build_agent_input(plan, worktree_path, settings)
     try:
-        r = agent.apply(task=agent_task, worktree=worktree_path, input=plan_text)
+        with security.preserve_git_origin(worktree_path):
+            r = agent.apply(task=agent_task, worktree=worktree_path, input=plan_text)
+    except security.GitRemoteMutationError:
+        raise
     except Exception as exc:
         recovered = _recover_agent_contract_violation(
             agent_name=agent.name,
@@ -65,8 +68,12 @@ def build_agent_input(plan: dict, worktree_path: Path, settings: Settings) -> st
         handoff = openspec.build_implementation_handoff(
             worktree_path,
             timeout_sec=settings.verify_command_timeout_sec,
+            plan_artifacts=[str(path) for path in plan.get("openspec_artifacts", [])],
         )
         retry_feedback = _format_retry_feedback(plan)
+        pr_feedback = str(plan.get("_pr_feedback") or "").strip()
+        if pr_feedback:
+            handoff = f"{handoff}\n\n## PR feedback to address\n{pr_feedback}"
         if retry_feedback:
             return f"{handoff}\n\n{retry_feedback}"
         return handoff

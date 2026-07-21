@@ -24,6 +24,10 @@ is supplied, treat the OpenSpec artifacts as the source of truth for scope.
    primary evidence for the failure. Fix the product source, tests, packaging
    inputs, or build scripts that caused the job failure. Do not edit CI
    configuration just to bypass or mask the failing job.
+6. For feedback about an error or exception, correct the failing behavior and
+   add regression coverage. Logging or error-message presentation alone does
+   not satisfy functional feedback unless the reviewer explicitly requested
+   only observability text.
 
 ## Constraints
 

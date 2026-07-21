@@ -29,3 +29,25 @@ def test_worker_alone_mounts_operator_ssh_directory_read_only() -> None:
     worker = compose.split("  worker:", 1)[1].split("  pr-feedback:", 1)[0]
     assert mount in worker
     assert "BEGIN OPENSSH PRIVATE KEY" not in compose
+
+
+def test_worker_alone_loads_svfm_deployment_environment() -> None:
+    compose_path = Path(__file__).parents[1] / "docker-compose.yml"
+    compose = compose_path.read_text(encoding="utf-8")
+
+    env_file = "${SVFM_ENV_FILE:-C:/Users/TEMP.BPC/.svfm-mac-mini.env}"
+    worker = compose.split("  worker:", 1)[1].split("  pr-feedback:", 1)[0]
+    assert f"      - {env_file}\n" in worker
+
+
+def test_worker_alone_mounts_svfm_environment_file_read_only() -> None:
+    compose_path = Path(__file__).parents[1] / "docker-compose.yml"
+    compose = compose_path.read_text(encoding="utf-8")
+
+    mount = (
+        "${SVFM_ENV_FILE:-C:/Users/TEMP.BPC/.svfm-mac-mini.env}:"
+        "/root/.svfm-mac-mini.env:ro"
+    )
+    assert compose.count(mount) == 1
+    worker = compose.split("  worker:", 1)[1].split("  pr-feedback:", 1)[0]
+    assert mount in worker

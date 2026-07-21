@@ -141,6 +141,9 @@ def test_pr_feedback_once_applies_fix_pushes_same_branch_and_comments(tmp_path: 
         "foundry.workflows.verify_stage.run",
         return_value={"passed": True, "report": "green"},
     ), patch(
+        "foundry.workflows._changed_files_for_pr_feedback",
+        return_value=[],
+    ), patch(
         "foundry.workflows.pr_stage.commit_and_push_changes",
         return_value={"branch": "foundry/task-1", "files_changed": 1},
     ) as push:
@@ -178,6 +181,69 @@ def test_pr_feedback_once_applies_fix_pushes_same_branch_and_comments(tmp_path: 
     assert ".gitlab-ci.yml" in prompt
 
 
+def test_pr_feedback_retry_preserves_fix_and_includes_verifier_report(
+    tmp_path: Path,
+) -> None:
+    settings = replace(_settings(tmp_path), max_implement_attempts=2)
+    state.init_db(settings.db_path)
+    task = _seed_task(settings.db_path)
+    change = ForgeChange(
+        number=7,
+        title="foundry: task",
+        branch="foundry/task-1",
+        url="https://github.com/owner/sandbox/pull/7",
+    )
+    feedback = ChangeFeedback(
+        items=(FeedbackItem("review-1", "Fix the build.", "reviewer"),)
+    )
+    provider = MagicMock()
+    provider.kind = ForgeKind.GITHUB
+    provider.list_changes.return_value = [change]
+    provider.load_feedback.return_value = feedback
+
+    with patch(
+        "foundry.workflows._prepare_pr_feedback_worktree",
+        return_value=(tmp_path / "base", tmp_path / "wt"),
+    ), patch(
+        "foundry.workflows.worktree.cleanup_worktree"
+    ) as cleanup, patch(
+        "foundry.workflows.agent_implement_stage.run",
+        side_effect=[
+            {"result": "added the first dependency", "response": ""},
+            {"result": "corrected the dependency", "response": ""},
+        ],
+    ) as implement, patch(
+        "foundry.workflows.verify_stage.run",
+        side_effect=[
+            {
+                "passed": False,
+                "retryable": True,
+                "failure_kind": "acceptance",
+                "report": "JpaRepository requires spring-data-jpa",
+            },
+            {"passed": True, "report": "green"},
+        ],
+    ), patch(
+        "foundry.workflows.pr_stage.commit_and_push_changes",
+        return_value={"branch": "foundry/task-1", "files_changed": 1},
+    ) as push:
+        processed = workflows.pr_feedback_once(settings, provider)
+
+    assert [item.id for item in processed] == [task.id]
+    assert implement.call_count == 2
+    assert implement.call_args_list[0].args[2] == tmp_path / "wt"
+    assert implement.call_args_list[1].args[2] == tmp_path / "wt"
+    retry_plan = implement.call_args_list[1].args[1]
+    assert "added the first dependency" in retry_plan["plan"]
+    assert "JpaRepository requires spring-data-jpa" in retry_plan["plan"]
+    assert "Preserve and review all existing task changes" in retry_plan["plan"]
+    retry_prompt = _latest_implement_prompt(settings.db_path, task.id)
+    assert "Previous implement summary" in retry_prompt
+    assert "Previous verification report" in retry_prompt
+    push.assert_called_once()
+    cleanup.assert_called_once()
+
+
 def test_pr_feedback_openspec_mode_includes_openspec_context(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     settings = replace(settings, openspec_mode=True)
@@ -209,9 +275,22 @@ def test_pr_feedback_openspec_mode_includes_openspec_context(tmp_path: Path) -> 
         "foundry.workflows._prepare_pr_feedback_worktree",
         return_value=(tmp_path / "base", tmp_path / "wt"),
     ), patch("foundry.workflows.worktree.cleanup_worktree"), patch(
+        "foundry.workflows.openspec.collect_context",
+        return_value={"present": True, "forced": True},
+    ), patch(
+        "foundry.workflows.openspec.format_context",
+        return_value=["### OpenSpec", "Active change: demo"],
+    ), patch(
         "foundry.workflows.openspec.build_implementation_handoff",
         return_value="Active change: demo\n- openspec/changes/demo/tasks.md",
     ) as handoff, patch(
+        "foundry.workflows.agent_plan_stage.run",
+        return_value={
+            "plan": "Updated OpenSpec tasks",
+            "summary": "updated",
+            "openspec_artifacts": ["openspec/changes/demo/tasks.md"],
+        },
+    ) as plan, patch(
         "foundry.workflows.agent_implement_stage.run",
         return_value={"result": "fixed", "response": ""},
     ) as implement, patch(
@@ -226,22 +305,87 @@ def test_pr_feedback_openspec_mode_includes_openspec_context(tmp_path: Path) -> 
     handoff.assert_called_once_with(
         tmp_path / "wt",
         timeout_sec=settings.verify_command_timeout_sec,
-        include_skill_bodies=False,
+        plan_artifacts=["openspec/changes/demo/tasks.md"],
     )
-    implement_input = implement.call_args.args[1]["plan"]
-    assert "## OpenSpec context" in implement_input
-    assert "Active change: demo" in implement_input
-    assert implement_input.rfind("## Feedback to address") > implement_input.rfind(
-        "## OpenSpec context"
-    )
-    assert "Please validate openspec/changes/demo/tasks.md" in implement_input
-    assert implement.call_args.args[1]["_prompt_template"] == "pr_feedback"
+    planner_input = plan.call_args.kwargs["planner_input"]
+    assert "Update the existing OpenSpec change" in planner_input
+    assert "## Feedback to plan" in planner_input
+    assert "Please validate openspec/changes/demo/tasks.md" in planner_input
+    implementation_plan = implement.call_args.args[1]
+    assert implementation_plan["openspec_artifacts"] == [
+        "openspec/changes/demo/tasks.md"
+    ]
+    assert "Please validate openspec/changes/demo/tasks.md" in implementation_plan[
+        "_pr_feedback"
+    ]
+    assert "_prompt_template" not in implementation_plan
+
+    events = read_events(settings.db_path, task_id=task.id)
+    feedback_events = [event for event in events if event.kind == "pr_feedback"]
+    assert feedback_events[0].stage == Stage.PLAN.value
+    assert feedback_events[0].payload["stage"] == Stage.PLAN.value
+    plan_started = [
+        event
+        for event in events
+        if event.stage == Stage.PLAN.value and event.kind == "stage_started"
+    ]
+    assert "OpenSpec planning agent" in plan_started[-1].payload["input"]["prompt"]
 
     prompt = _latest_implement_prompt(settings.db_path, task.id)
-    assert "OpenSpec context" in prompt
-    assert "Active change: demo" in prompt
+    assert "OpenSpec implementation agent" in prompt
+    assert "## PR feedback to address" in prompt
+    assert "Please validate openspec/changes/demo/tasks.md" in prompt
     assert "Human clarification from issue comments" not in prompt
-    assert "Этап 1" not in prompt
+
+
+def test_openspec_pr_feedback_plan_can_request_human_input(tmp_path: Path) -> None:
+    settings = replace(_settings(tmp_path), openspec_mode=True)
+    state.init_db(settings.db_path)
+    task = _seed_task(settings.db_path)
+    change = ForgeChange(
+        number=7,
+        title="foundry: task",
+        branch="foundry/task-1",
+        url="https://github.com/owner/sandbox/pull/7",
+    )
+    feedback = ChangeFeedback(
+        items=(FeedbackItem("review-1", "Clarify expected behavior.", "reviewer"),)
+    )
+    provider = MagicMock()
+    provider.kind = ForgeKind.GITHUB
+    provider.list_changes.return_value = [change]
+    provider.load_feedback.return_value = feedback
+
+    with patch(
+        "foundry.workflows._prepare_pr_feedback_worktree",
+        return_value=(tmp_path / "base", tmp_path / "wt"),
+    ), patch("foundry.workflows.worktree.cleanup_worktree"), patch(
+        "foundry.workflows.openspec.collect_context",
+        return_value={"present": True, "forced": True},
+    ), patch(
+        "foundry.workflows.openspec.format_context",
+        return_value=["### OpenSpec", "Active change: demo"],
+    ), patch(
+        "foundry.workflows.openspec.build_implementation_handoff",
+        return_value="Active change: demo",
+    ), patch(
+        "foundry.workflows.agent_plan_stage.run",
+        return_value={
+            "plan": "Which behavior is expected?\nNEED_VERIFICATION",
+            "summary": "needs input",
+            "openspec_artifacts": [],
+        },
+    ), patch(
+        "foundry.workflows._block_for_human",
+        return_value=task,
+    ) as block, patch(
+        "foundry.workflows.agent_implement_stage.run"
+    ) as implement:
+        workflows.pr_feedback_once(settings, provider)
+
+    block.assert_called_once()
+    assert block.call_args.kwargs["blocked_stage"] is Stage.PLAN
+    implement.assert_not_called()
 
 
 def test_pr_feedback_allows_verified_noop_fix(tmp_path: Path) -> None:
@@ -277,6 +421,9 @@ def test_pr_feedback_allows_verified_noop_fix(tmp_path: Path) -> None:
     ), patch(
         "foundry.workflows.verify_stage.run",
         return_value={"passed": True, "report": "green"},
+    ), patch(
+        "foundry.workflows._changed_files_for_pr_feedback",
+        return_value=[],
     ), patch(
         "foundry.workflows.pr_stage.commit_and_push_changes",
         return_value={

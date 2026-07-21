@@ -126,7 +126,7 @@ def _push_branch(
     allow_replace_remote: bool,
 ) -> None:
     push_cmd = ["git", "push", "-u", "origin", f"HEAD:{branch_name}"]
-    result = shell.run(push_cmd, cwd=worktree_path, check=False)
+    result = shell.run(push_cmd, cwd=worktree_path, check=False, allow_unsafe=True)
     if result.ok:
         return
     if not _is_non_fast_forward_rejection(result.stderr):
@@ -139,7 +139,7 @@ def _push_branch(
     remote_ref = f"origin/{branch_name}"
     shell.run(["git", "fetch", "origin", branch_name], cwd=worktree_path)
     shell.run(["git", "rebase", remote_ref], cwd=worktree_path)
-    shell.run(push_cmd, cwd=worktree_path)
+    shell.run(push_cmd, cwd=worktree_path, allow_unsafe=True)
 
 
 def _replace_remote_branch_with_lease(worktree_path: Path, branch_name: str) -> None:

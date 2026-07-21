@@ -69,6 +69,86 @@ def test_gitlab_http_host_uses_direct_api_without_glab(monkeypatch) -> None:
     assert requests[0].headers["Private-token"] == "token"
 
 
+def test_gitlab_issue_includes_text_attachment_content(monkeypatch) -> None:
+    provider = GitLabProvider("gitlab.example")
+    monkeypatch.setattr(
+        provider,
+        "_api",
+        lambda endpoint: {
+            "iid": 4,
+            "title": "Fix failure",
+            "description": (
+                "See [error.log](/uploads/abc123/error.log) and "
+                "[again](/uploads/abc123/error.log)."
+            ),
+            "labels": ["agent-task"],
+            "web_url": "https://gitlab.example/group/repo/-/issues/4",
+        },
+    )
+    endpoints: list[str] = []
+
+    def raw_api(endpoint: str) -> str:
+        endpoints.append(endpoint)
+        return "NullPointerException at Handler.java:42"
+
+    monkeypatch.setattr(provider, "_raw_api", raw_api)
+
+    issue = provider.get_issue("group/sub repo", 4)
+
+    assert "## GitLab issue attachments" in issue.body
+    assert "### `error.log`" in issue.body
+    assert "NullPointerException at Handler.java:42" in issue.body
+    assert endpoints == [
+        "/projects/group%2Fsub%20repo/uploads/abc123/error.log"
+    ]
+
+
+def test_gitlab_issue_marks_binary_attachment_without_downloading(
+    monkeypatch,
+) -> None:
+    provider = GitLabProvider("gitlab.example")
+    raw_api = MagicMock()
+    monkeypatch.setattr(provider, "_raw_api", raw_api)
+
+    issue = provider._issue(
+        {
+            "iid": 4,
+            "title": "Screenshot",
+            "description": "![failure](/uploads/abc123/failure.png)",
+            "labels": ["agent-task"],
+            "web_url": "https://gitlab.example/group/repo/-/issues/4",
+        },
+        "group/repo",
+    )
+
+    assert "Binary or unsupported attachment" in issue.body
+    assert "failure.png" in issue.body
+    raw_api.assert_not_called()
+
+
+def test_gitlab_issue_truncates_large_text_attachment(monkeypatch) -> None:
+    provider = GitLabProvider("gitlab.example")
+    monkeypatch.setattr(
+        provider,
+        "_raw_api",
+        lambda endpoint: "x" * 60_000,
+    )
+
+    issue = provider._issue(
+        {
+            "iid": 4,
+            "title": "Large log",
+            "description": "[large.log](/uploads/abc123/large.log)",
+            "labels": ["agent-task"],
+            "web_url": "https://gitlab.example/group/repo/-/issues/4",
+        },
+        "group/repo",
+    )
+
+    assert "Attachment content truncated by The Foundry" in issue.body
+    assert "x" * 50_000 in issue.body
+
+
 def test_gitlab_feedback_uses_unresolved_discussions_and_current_sha(
     monkeypatch,
 ) -> None:
